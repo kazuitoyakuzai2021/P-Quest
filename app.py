@@ -1892,7 +1892,7 @@ def render_matrix_view():
         st.download_button(
             label="📗 Excelレポートをダウンロード",
             data=output.getvalue(),
-            file_name=f"進捗レポート_{datetime.now().strftime('%Y%m%d')}.xlsx",  # ← ここでエラーが出ていました
+            file_name=f"進捗レポート_{datetime.datetime.now().strftime('%Y%m%d')}.xlsx",  # ← ここでエラーが出ていました
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             width='stretch'
         )
@@ -2162,3 +2162,4 @@ def main():
 if __name__ == "__main__":
 
     main()
+
