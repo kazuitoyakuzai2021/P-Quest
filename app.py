@@ -10,7 +10,6 @@ import shutil
 import time
 import io
 import plotly.express as px
-#from datetime import datetime
 from collections import Counter
 
 # --- 1. 設定・パス関連 ---
@@ -402,7 +401,7 @@ def show_main_menu():
         {"title": "📝 問題演習", "id": "quiz", "col": m_col2},
         {"title": "❓ 掲示板", "id": "board", "col": m_col3},
         {"title": "📖 勉強会資料", "id": "meeting", "col": m_col1},
-       ## {"title": "🔢 拡張機能", "id": "tools", "col": m_col2},##
+       {"title": "💻 シミュレーション", "id": "simulation", "col": m_col2},
         {"title": "📔 業務日誌", "id": "diary", "col": m_col3},
     ]
 
@@ -437,7 +436,9 @@ def show_study_page():
     # --- サイドバー：フィルター ---
     with st.sidebar:
         st.markdown("### 🔍 フィルター")
-        sub_categories = {"内規": ["調剤室業務", "注射室業務"], "薬剤": ["精神神経・筋疾患", "循環器疾患", "呼吸器疾患", "感染症", "悪性腫瘍", "その他"],
+        sub_categories = {"内規": ["調剤室業務", "注射室業務"], "薬剤": ["精神神経・筋疾患", "骨・関節疾患", "免疫疾患", "心臓・血管系疾患", "腎・泌尿器疾患",
+                  "産科婦人科疾患", "呼吸器疾患", "消化器疾患", "血液及び造血器疾患",
+                  "感覚器疾患", "内分泌・代謝疾患", "皮膚疾患", "感染症", "悪性腫瘍", "その他"],
                           "チーム": ["感染", "栄養", "緩和"], "その他": ["その他"]}
         p_filter = st.selectbox("大カテゴリー", ["すべて"] + list(sub_categories.keys()))
         c_filter = st.selectbox("小カテゴリー", ["すべて"] + (sub_categories[p_filter] if p_filter != "すべて" else []))
@@ -1892,7 +1893,7 @@ def render_matrix_view():
         st.download_button(
             label="📗 Excelレポートをダウンロード",
             data=output.getvalue(),
-            file_name=f"進捗レポート_{datetime.datetime.now().strftime('%Y%m%d')}.xlsx",  # ← ここでエラーが出ていました
+            file_name=f"進捗レポート_{datetime.now().strftime('%Y%m%d')}.xlsx",  # ← ここでエラーが出ていました
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             width='stretch'
         )
@@ -1917,14 +1918,10 @@ def render_checklist_editor():
         st.success("タスクリストを更新しました。")
         time.sleep(1)
         st.rerun()
-
-
 # --- 定数設定（Tkinter版のパスを継承） ---
 IN_DATA_DIR = "assets/spread_data"
 OUT_DATA_DIR = "assets/drive_data"
 ASSETS_DIR = "assets"
-
-
 def show_search_page():
     st.title("🔍 P-QUEST 統合検索システム")
 
@@ -2003,10 +2000,7 @@ def show_search_page():
     if st.button("🏠 メインメニューへ戻る", width='stretch'):
         st.session_state.page = "main"
         st.rerun()
-
-
 # --- 履歴管理用補助関数 ---
-
 def save_search_log(query):
     """個人の検索履歴を保存（assets/users/ID/search_history.csv）"""
     if 'user' not in st.session_state: return
@@ -2019,8 +2013,6 @@ def save_search_log(query):
     with open(log_path, "a", encoding="utf_8_sig", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M"), query])
-
-
 def get_search_ranking():
     """全ユーザーの履歴を集計して上位10件を返す"""
     all_queries = []
@@ -2039,6 +2031,400 @@ def get_search_ranking():
                     pass
 
     return Counter(all_queries).most_common(10)
+def show_simulation_page():
+    # サブページの初期化
+    if 'sub_page' not in st.session_state:
+        st.session_state['sub_page'] = 'menu'
+
+    # 1. メニュー画面
+    if st.session_state['sub_page'] == 'menu':
+        st.markdown("## 🎮 シミュレーション・トレーニング")
+        st.write("トレーニングしたい項目を選択してください。")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            with st.container(border=True):
+                st.subheader("💊 持参薬鑑別")
+                st.write("お薬手帳と現物を確認し、鑑別報告書を作成する練習です。")
+                if st.button("持参薬鑑別を始める", use_container_width=True, type="primary"):
+                    st.session_state['sub_page'] = 'kanbetsu'
+                    st.rerun()
+
+        with col2:
+            with st.container(border=True):
+                st.subheader("🧪 レジメン監査")
+                st.write("浜松医療センターのプロトコルに基づき、抗がん剤の処方監査を練習します。")
+                if st.button("レジメン監査を始める", use_container_width=True, type="primary"):
+                    st.session_state['sub_page'] = 'regimen'
+                    st.rerun()
+
+        st.divider()
+        if st.button("🏠 メインメニューへ戻る"):
+            st.session_state['page'] = 'main'
+            st.rerun()
+
+    # 2. 持参薬鑑別ページ
+    elif st.session_state['sub_page'] == 'kanbetsu':
+        show_kanbetsu_practice() # 前回の厳格判定版
+
+    # 3. レジメン監査ページ
+    elif st.session_state['sub_page'] == 'regimen':
+        show_regimen_simulation() # 新規作成
+def show_kanbetsu_practice():
+    # --- 1. 厳格なユーザー特定 ---
+    # ログイン時にセットされた st.session_state['user'] を参照
+    if 'user' not in st.session_state or not st.session_state['user'].get('id'):
+        st.error("❌ ログイン情報が確認できません。一度ログアウトして再度ログインしてください。")
+        if st.button("ログイン画面へ"):
+            st.session_state.clear()
+            st.rerun()
+        return
+
+    user_id = st.session_state['user']['id']
+    user_dir = f"assets/users/{user_id}"
+
+    # ログイン時に初期化されているはずだが、念のため安全策
+    if not os.path.exists(user_dir):
+        os.makedirs(user_dir, exist_ok=True)
+
+    log_file = f"{user_dir}/kanbetsu_history.csv"
+
+    st.markdown("### 💊 持参薬鑑別トレーニング")
+
+    # --- 2. データの読み込み ---
+    @st.cache_data
+    def load_data():
+        m_path = "assets/spread_data/drug_master.csv"
+        c_path = "assets/spread_data/kanbetsu_cases.csv"
+        m_df = pd.read_csv(m_path, encoding="utf_8_sig") if os.path.exists(m_path) else pd.DataFrame(columns=["品名"])
+        c_df = pd.read_csv(c_path, encoding="utf_8_sig") if os.path.exists(c_path) else pd.DataFrame()
+        if not c_df.empty:
+            c_df.columns = c_df.columns.str.strip()
+        return m_df, c_df
+
+    master_df, cases_df = load_data()
+
+    # --- 3. 患者選択と状態管理 ---
+    target_id = st.sidebar.selectbox(
+        "演習する症例を選択",
+        options=cases_df["case_id"].tolist() if not cases_df.empty else [1],
+        format_func=lambda x: f"ID:{x}"
+    )
+
+    if "last_case_id" not in st.session_state or st.session_state.last_case_id != target_id:
+        st.session_state.target_med_idx = 0
+        st.session_state.last_case_id = target_id
+        st.session_state.show_results = False
+        # ウィジェットのキーをリセット
+        for key in list(st.session_state.keys()):
+            if any(key.startswith(prefix) for prefix in ["sb_", "ds_", "us_", "dy_", "rm_", "cm_"]):
+                del st.session_state[key]
+
+    selected_case = cases_df[cases_df["case_id"] == target_id].iloc[0]
+    parts = selected_case["handbooks"].split(",")
+    hospital_name = parts[0]
+    raw_meds = parts[1].split("/")
+
+    parsed_handbook = []
+    for m_str in raw_meds:
+        m = m_str.split(":")
+        if len(m) >= 5:
+            drug_full = m[0]
+            drug_name = drug_full.split(".", 1)[1] if "." in drug_full else drug_full
+            parsed_handbook.append({
+                "name": drug_name.strip(), "dose": m[1].strip(), "usage": m[2].strip(),
+                "days": m[3].strip(), "stock": m[4].strip()
+            })
+
+    # --- 4. 上部UI：手帳参照と現物確認 ---
+    col_left, col_right = st.columns([1, 1])
+    with col_left:
+        st.markdown(
+            f'<div style="background-color: white; padding: 10px; border: 1px solid #ccc; border-radius: 5px; color: #333; font-family: \'MS Gothic\', sans-serif;"><b>{selected_case["patient_name"]} 様</b> ({hospital_name})</div>',
+            unsafe_allow_html=True)
+        for i, med in enumerate(parsed_handbook):
+            bg = "#f0f8ff" if i == st.session_state.target_med_idx else "transparent"
+            st.markdown(
+                f'<div style="background-color: {bg}; border-bottom: 1px solid #eee; padding: 4px; font-size: 0.8em; color: #333;">{i + 1}) {med["name"]} {med["dose"]} 【{med["usage"]}】</div>',
+                unsafe_allow_html=True)
+
+    with col_right:
+        curr_idx = st.session_state.target_med_idx
+        target_med = parsed_handbook[curr_idx]
+        st.info(f"現物確認中：**{target_med['name']}**")
+        c1, c2, c3 = st.columns([1, 1.5, 1])
+        if c1.button("⬅️ 前へ", use_container_width=True) and curr_idx > 0:
+            st.session_state.target_med_idx -= 1
+            st.rerun()
+        c2.write(f"<center>{curr_idx + 1} / {len(parsed_handbook)}剤目</center>", unsafe_allow_html=True)
+        if c3.button("次へ ➡️", use_container_width=True) and curr_idx < len(parsed_handbook) - 1:
+            st.session_state.target_med_idx += 1
+            st.rerun()
+
+        # アイコン表示
+        stock_num = int(target_med['stock'])
+        icon = "💊" if "カプセル" in target_med['name'] else "⚪"
+        icons_html = "".join(
+            [f"<span style='font-size: 20px;'>{icon}</span>" + ("<br>" if (j + 1) % 10 == 0 else "") for j in
+             range(stock_num)])
+        st.markdown(
+            f'<div style="background-color: #f8f9fa; padding: 10px; border: 1px solid #ddd; border-radius: 10px; text-align: center; min-height: 120px;">{icons_html}</div>',
+            unsafe_allow_html=True)
+
+    st.divider()
+
+    # --- 5. 入力グリッドと「全項目」判定ロジック ---
+    st.markdown("#### 【鑑別登録】")
+
+    def calc_update(idx, mode):
+        try:
+            def get_val(key):
+                s = st.session_state.get(key, "0")
+                return float(''.join(filter(lambda x: x.isdigit() or x == '.', s))) if s else 0.0
+
+            dose = get_val(f"ds_{idx}")
+            if mode == "days":
+                st.session_state[f"rm_{idx}"] = str(int(dose * get_val(f"dy_{idx}")))
+            elif mode == "rem":
+                st.session_state[f"dy_{idx}"] = str(int(get_val(f"rm_{idx}") / dose))
+        except:
+            pass
+
+    usage_list = [
+        "", "1日1回起床時", "1日1回朝食前", "1日1回朝食直前", "1日1回朝食直後", "1日1回朝食後",
+        "1日1回昼食前", "1日1回昼食直後", "1日1回昼食後", "1日1回夕食前", "1日1回夕食直前", "1日1回夕食直後", "1日1回夕食後",
+        "1日1回就寝前", "1日1回空腹時", "1日2回朝食前と就寝前", "1日2回朝食後と就寝前", "1日2回朝昼食前", "1日2回朝昼食後",
+        "1日2回朝夕食前", "1日2回朝夕食直前", "1日2回朝夕食直後", "1日2回朝夕食後", "1日2回昼夕食前", "1日2回昼夕食後",
+        "1日2回夕食前と就寝前", "1日2回夕食後と就寝前", "1日3回朝昼夕食前", "1日3回朝昼夕食直前", "1日3回朝昼夕食直後", "1日3回朝昼夕食後",
+        "1日3回朝食後・昼食後・就寝前", "1日3回朝食後・夕食後・就寝前", "1日4回朝昼夕食前と就寝前", "1日4回朝昼夕食後と就寝前",
+        "頓用(疼痛時)", "頓用(発熱時)", "頓用(不眠時)", "頓用(便秘時)", "頓用(発作時)", "1日1回貼付", "1日2回貼付", "1日1回外用"
+    ]
+
+    h_cols = st.columns([0.5, 3.0, 0.8, 1.8, 0.7, 0.7, 1.5])
+    for col, label in zip(h_cols, ["No", "薬品名", "1日量", "用法", "日数", "残数", "全判定"]): col.write(f"**{label}**")
+
+    total_error_cells = 0
+    mistake_log_details = []
+
+    for i in range(len(parsed_handbook)):
+        ans = parsed_handbook[i]
+        cols = st.columns([0.5, 3.0, 0.8, 1.8, 0.7, 0.7, 1.5])
+        cols[0].write(f"{i + 1}")
+
+        # 各入力Widget
+        u_name = cols[1].selectbox(f"drug_{i}", options=[""] + master_df["品名"].tolist(), label_visibility="collapsed",
+                                   key=f"sb_{i}")
+        u_dose = cols[2].text_input("量", label_visibility="collapsed", key=f"ds_{i}")
+        u_usage = cols[3].selectbox("用", options=usage_list, label_visibility="collapsed", key=f"us_{i}")
+        u_days = cols[4].text_input("日", label_visibility="collapsed", key=f"dy_{i}", on_change=calc_update,
+                                    args=(i, "days"))
+        u_rem = cols[5].text_input("残", label_visibility="collapsed", key=f"rm_{i}", on_change=calc_update,
+                                   args=(i, "rem"))
+
+        # 判定ロジックの強化
+        if st.session_state.get("show_results"):
+            def norm(v):
+                # 単位を除去し、空文字の場合は比較不能な特殊文字を返して確実に不一致にする
+                val = str(v).strip().replace("錠", "").replace("g", "")
+                return val if val != "" else "EMPTY_VALUE_ERROR"
+
+            # 1つずつ個別に判定し、空欄も「不一致」にする
+            # 薬品名と用法はセレクトボックスなので空文字("")との比較
+            err_list = []
+            if u_name != ans["name"]: err_list.append("薬")
+            if norm(u_dose) != norm(ans["dose"]): err_list.append("量")
+            if u_usage != ans["usage"]: err_list.append("法")
+            if norm(u_days) != norm(ans["days"]): err_list.append("日")
+            if norm(u_rem) != norm(ans["stock"]): err_list.append("残")
+
+            if not err_list:
+                cols[6].success("✅ Clear")
+            else:
+                # 間違いがあった場合
+                cols[6].error(f"❌ {' '.join(err_list)}")
+                total_error_cells += len(err_list)  # 間違った項目の総数を加算
+                mistake_log_details.append(f"Rp{i + 1}:{''.join(err_list)}")
+
+    # 判定ボタン押下時の処理
+    if st.button("🏁 判定して記録を保存", use_container_width=True, type="primary"):
+        st.session_state.show_results = True
+
+        # ここで計算された total_error_cells が 0 より大きければ間違いとして記録される
+        log_entry = pd.DataFrame([{
+            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "case_id": target_id,
+            "mistake_count": total_error_cells,  # ここが空欄分もしっかりカウントされる
+            "details": "|".join(mistake_log_details)
+        }])
+
+        # ユーザーフォルダへの保存（ログインIDを厳格に使用）
+        user_id = st.session_state['user']['id']
+        log_file = f"assets/users/{user_id}/kanbetsu_history.csv"
+        log_entry.to_csv(log_file, mode='a', header=not os.path.exists(log_file), index=False, encoding="utf_8_sig")
+        st.rerun()
+
+        # 関数の最後の方にあるボタンを修正
+    if st.button("🏠 シミュレーションメニューに戻る", use_container_width=True):
+        st.session_state['sub_page'] = 'menu'  # ここで子ページをリセット
+        st.rerun()
+
+
+def show_regimen_simulation():
+    # --- 1. スタイル定義 ---
+    st.markdown("""
+        <style>
+        .matrix-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; background-color: white; table-layout: fixed; }
+        .matrix-table th, .matrix-table td { border: 1px solid #666 !important; padding: 4px; text-align: center; }
+        .row-label { background-color: #e0e0e0 !important; font-weight: bold; text-align: left !important; width: 150px; }
+        .sub-label { background-color: #f9f9f9 !important; text-align: left !important; padding-left: 10px !important; width: 120px; }
+        .header-dark { background-color: #444 !important; color: white !important; }
+        .header-gray { background-color: #eee !important; font-weight: bold; }
+        .mark-dot { color: blue !important; font-weight: bold; font-size: 1.1rem; }
+        .mark-star { color: orange !important; font-weight: bold; font-size: 1.1rem; }
+        .desc-box { font-size: 0.75rem; color: #555; background-color: #f0f2f6; padding: 10px; border-radius: 5px; margin-top: 10px; }
+        </style>
+    """, unsafe_allow_html=True)
+
+    # --- 2. データロード ---
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(current_dir, "assets", "spread_data")
+    # 集約型CSVを使用
+    df_cases = pd.read_csv(os.path.join(data_dir, "regimen_cases.csv"))
+
+    # 患者選択
+    patient_names = df_cases['patient_name'].unique().tolist()
+    selected_name = st.sidebar.selectbox("患者氏名", patient_names)
+
+    # 対象患者の全薬剤データを取得
+    patient_data = df_cases[df_cases['patient_name'] == selected_name]
+    case = patient_data.iloc[0]  # 身体情報は最初の1行から取得
+    p_id = str(case['case_id'])
+
+    # --- 3. 最上部：医師連絡 / カルテメモ ---
+    st.error(f"📋 **医師連絡 / カルテメモ**\n\n{case['memo'] if pd.notna(case['memo']) else '特記事項なし'}")
+
+    # --- 4. セッション管理 ---
+    for key in [f"audit_mark_{p_id}", f"audit_memo_{p_id}", f"check_mark_{p_id}", f"check_memo_{p_id}"]:
+        if key not in st.session_state: st.session_state[key] = ""
+    if f"show_cust_{p_id}" not in st.session_state: st.session_state[f"show_cust_{p_id}"] = False
+
+    # 各薬剤のカスタム比率（％）を初期化
+    for _, drug in patient_data.iterrows():
+        k = f"r_{p_id}_{drug['drug_name']}"
+        if k not in st.session_state:
+            st.session_state[k] = float(drug['cust_curr'])
+
+    # --- 5. 操作パネル ---
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**🖋️ 判定入力**")
+        st.selectbox("監査 判定", ["", "●", "★"], key=f"sel_a_{p_id}")
+        st.text_input("監査 備考", key=f"mem_a_{p_id}")
+        st.selectbox("当日確認 判定", ["", "●", "★"], key=f"sel_c_{p_id}")
+        st.text_input("当日 備考", key=f"mem_c_{p_id}")
+        if st.button("反映"):
+            st.session_state[f"audit_mark_{p_id}"] = st.session_state[f"sel_a_{p_id}"]
+            st.session_state[f"audit_memo_{p_id}"] = st.session_state[f"mem_a_{p_id}"]
+            st.session_state[f"check_mark_{p_id}"] = st.session_state[f"sel_c_{p_id}"]
+            st.session_state[f"check_memo_{p_id}"] = st.session_state[f"mem_c_{p_id}"]
+            st.rerun()
+    with col2:
+        st.markdown("**⚙️ レジメンカスタム**")
+        if st.button("設定を開く/閉じる"):
+            st.session_state[f"show_cust_{p_id}"] = not st.session_state[f"show_cust_{p_id}"]
+            st.rerun()
+        if st.session_state[f"show_cust_{p_id}"]:
+            for _, drug in patient_data.iterrows():
+                k = f"r_{p_id}_{drug['drug_name']}"
+                st.session_state[k] = st.number_input(f"{drug['drug_name']} (%)", value=st.session_state[k],
+                                                      key=f"num_{k}")
+
+    # --- 6. 日付・Day設定 ---
+    prev_label, today_label, next_label = "前回", "2/20", "2/21 (明日)"
+
+    # CSVのcycle_daysを「今日のDay数」として取得
+    today_day_count = case['cycle_days']
+    today_day_val = f"Day {today_day_count}"
+
+    # --- 7. 計算関数 ---
+    def calc_bsa(w, h):
+        return 0.007184 * (w ** 0.425) * (h ** 0.725)
+
+    def calc_ccr(age, w, cre, sex):
+        res = ((140 - age) * w) / (72 * cre)
+        return res * 0.85 if sex == '女' else res
+
+    def get_reco_mg(drug_row, weight, cre):
+        base = float(drug_row['base_dose'])
+        if drug_row['calc_type'] == 'bsa':
+            return base * calc_bsa(weight, drug_row['height'])
+        if drug_row['calc_type'] == 'calvert':
+            ccr = calc_ccr(drug_row['age'], weight, cre, drug_row['sex'])
+            return base * (min(ccr, 125) + 25)
+        return base
+
+    # --- 8. HTML構築 ---
+    h = "<table class='matrix-table'>"
+    h += f"<tr class='header-dark'><th colspan='2'>日付</th><th>{prev_label}</th><th>{today_label}</th><th>{next_label}</th></tr>"
+
+    # day行の修正：今日はDay [cycle_days]、明日はDay 1
+    h += f"<tr class='header-gray'><th colspan='2'>day</th><td>Day 1</td><td>{today_day_val}</td><td>Day 1</td></tr>"
+
+    h += f"<tr><td colspan='2' class='row-label'>監査判定</td><td></td><td></td><td><span class='mark-dot'>{st.session_state[f'audit_mark_{p_id}']}</span></td></tr>"
+    h += f"<tr><td colspan='2' class='row-label'>備考 (監査)</td><td></td><td></td><td>{st.session_state[f'audit_memo_{p_id}']}</td></tr>"
+    h += f"<tr><td colspan='2' class='row-label'>当日確認</td><td></td><td></td><td><span class='mark-star'>{st.session_state[f'check_mark_{p_id}']}</span></td></tr>"
+    h += f"<tr><td colspan='2' class='row-label'>備考 (当日)</td><td></td><td></td><td>{st.session_state[f'check_memo_{p_id}']}</td></tr>"
+
+    h += "<tr class='header-gray'><td colspan='5' style='text-align:left; padding-left:10px;'>【身体情報】</td></tr>"
+    h += f"<tr><td colspan='2' class='sub-label'>体重 (kg) / Cre</td><td>{case['weight_prev']} / {case['cre_prev']}</td><td></td><td>{case['weight_curr']} / {case['cre_curr']}</td></tr>"
+    h += f"<tr><td colspan='2' class='sub-label'>BSA (m²)</td><td>{calc_bsa(case['weight_prev'], case['height']):.2f}</td><td></td><td>{calc_bsa(case['weight_curr'], case['height']):.2f}</td></tr>"
+
+    for _, drug in patient_data.iterrows():
+        # 推奨量(100%)の算出
+        reco_prev_100 = get_reco_mg(drug, drug['weight_prev'], drug['cre_prev'])
+        reco_curr_100 = get_reco_mg(drug, drug['weight_curr'], drug['cre_curr'])
+
+        # カスタム比率適用後の推奨
+        c_ratio_curr = st.session_state[f"r_{p_id}_{drug['drug_name']}"]
+        reco_final_curr = reco_curr_100 * (c_ratio_curr / 100)
+        reco_final_prev = reco_prev_100 * (drug['cust_prev'] / 100)
+
+        # 実際のOrder量
+        prev_order = drug['order_prev']
+        curr_order = drug['order_curr']
+
+        # パーセンテージ計算
+        p_ratio_prev = (prev_order / reco_prev_100 * 100) if reco_prev_100 > 0 else 0
+        p_ratio_curr = (curr_order / reco_curr_100 * 100) if reco_curr_100 > 0 else 0
+        s_ratio_prev = (prev_order / reco_final_prev * 100) if reco_final_prev > 0 else 0
+        s_ratio_curr = (curr_order / reco_final_curr * 100) if reco_final_curr > 0 else 0
+
+        # 単位ラベル
+        unit = "AUC" if drug['calc_type'] == 'calvert' else "mg/m²"
+        dose_label = f"{drug['base_dose']} {unit}"
+
+        h += f"<tr class='header-gray'><td colspan='5' style='text-align:left; padding-left:10px;'>【{drug['drug_name']}】</td></tr>"
+        h += f"<tr><td rowspan='3' class='row-label'>投与量確認</td><td class='sub-label'>設定用量</td><td>{dose_label}</td><td></td><td>{dose_label}</td></tr>"
+        h += f"<tr><td class='sub-label'>推奨 (mg)</td><td>{reco_prev_100:.1f} ({p_ratio_prev:.1f}%)</td><td></td><td>{reco_curr_100:.1f} ({p_ratio_curr:.1f}%)</td></tr>"
+        h += f"<tr><td class='sub-label'>Order (mg)</td><td>{prev_order:.1f} ({s_ratio_prev:.1f}%)</td><td></td><td>{curr_order:.1f} ({s_ratio_curr:.1f}%)</td></tr>"
+
+    h += "</table>"
+    st.markdown(h, unsafe_allow_html=True)
+
+    # --- 9. 説明追記 ---
+    st.markdown("""
+        <div class='desc-box'>
+            <strong>【パーセンテージの定義】</strong><br>
+            ・<strong>推奨量(mg)の隣</strong>：標準量(100% dose)の推奨量に対して、実際のオーダー量が何％にあたるかを表示。<br>
+            ・<strong>Order(mg)の隣</strong>：カスタム設定(○○% dose)で算出された推奨量に対して、実際のオーダー量が何％にあたるかを表示。
+        </div>
+    """, unsafe_allow_html=True)
+
+    st.divider()
+    if st.button("🏠 シミュレーションメニューに戻る", use_container_width=True):
+        st.session_state['sub_page'] = 'menu'
+        st.rerun()
 # --- 5. メイン制御 ---
 def main():
     # --- 1. 状態の初期化 ---
@@ -2078,10 +2464,15 @@ def main():
     if current_page != 'main':
         with st.sidebar:
             st.markdown("---")
-            # 【修正】use_container_width=True を width='stretch' に変更
-            if st.button("🏠 メインメニューへ", width='stretch'):
+            # use_container_width=True でボタン幅を調整
+            if st.button("🏠 メインメニューへ", use_container_width=True):
                 # ページ移動時に各ページの状態をリセット
                 st.session_state['page'] = 'main'
+
+                # 【修正ポイント】シミュレーション内の階層をリセット
+                if 'sub_page' in st.session_state:
+                    st.session_state['sub_page'] = 'menu'
+
                 st.session_state['quiz_started'] = False
                 st.session_state.forum_view = "list"
                 st.session_state.temp_title = ""
@@ -2137,7 +2528,7 @@ def main():
         else:
             show_diary_page()
 
-    # H. 統合検索 (追加された機能)
+    # H. 統合検索
     elif current_page == 'search':
         show_search_page()
 
@@ -2149,8 +2540,8 @@ def main():
             st.error("アクセス権限がありません。")
 
     # J. 拡張ツール
-    elif current_page == 'tools':
-        st.info(f"ページ '{current_page}' は現在開発中です。")
+    elif current_page == 'simulation':
+        show_simulation_page()
 
     # K. 不明なページ
     else:
@@ -2160,6 +2551,4 @@ def main():
             st.rerun()
 
 if __name__ == "__main__":
-
     main()
-
