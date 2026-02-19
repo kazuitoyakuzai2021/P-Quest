@@ -2071,9 +2071,10 @@ def show_simulation_page():
     # 3. レジメン監査ページ
     elif st.session_state['sub_page'] == 'regimen':
         show_regimen_simulation() # 新規作成
+
+
 def show_kanbetsu_practice():
     # --- 1. 厳格なユーザー特定 ---
-    # ログイン時にセットされた st.session_state['user'] を参照
     if 'user' not in st.session_state or not st.session_state['user'].get('id'):
         st.error("❌ ログイン情報が確認できません。一度ログアウトして再度ログインしてください。")
         if st.button("ログイン画面へ"):
@@ -2084,31 +2085,45 @@ def show_kanbetsu_practice():
     user_id = st.session_state['user']['id']
     user_dir = f"assets/users/{user_id}"
 
-    # ログイン時に初期化されているはずだが、念のため安全策
     if not os.path.exists(user_dir):
         os.makedirs(user_dir, exist_ok=True)
 
-    log_file = f"{user_dir}/kanbetsu_history.csv"
-
     st.markdown("### 💊 持参薬鑑別トレーニング")
 
-    # --- 2. データの読み込み ---
+    # --- 2. データの読み込み (文字化け・KeyError対策版) ---
     @st.cache_data
     def load_data():
         m_path = "assets/spread_data/drug_master.csv"
+        # 鑑別用のケースファイル。シミュレーションと共通化している場合はファイル名に注意
         c_path = "assets/spread_data/kanbetsu_cases.csv"
-        m_df = pd.read_csv(m_path, encoding="utf_8_sig") if os.path.exists(m_path) else pd.DataFrame(columns=["品名"])
-        c_df = pd.read_csv(c_path, encoding="utf_8_sig") if os.path.exists(c_path) else pd.DataFrame()
-        if not c_df.empty:
-            c_df.columns = c_df.columns.str.strip()
+
+        # BOM付きUTF-8(Excel/PyCharm)を安全に読み込むための encoding='utf-8-sig'
+        def safe_read_csv(path):
+            if os.path.exists(path):
+                tmp_df = pd.read_csv(path, encoding="utf_8_sig")
+                # カラム名に含まれるBOMや空白、引用符を徹底的に掃除
+                tmp_df.columns = tmp_df.columns.str.strip().str.replace('"', '').str.replace("'", "")
+                return tmp_df
+            return pd.DataFrame()
+
+        m_df = safe_read_csv(m_path)
+        if m_df.empty:
+            m_df = pd.DataFrame(columns=["品名"])
+
+        c_df = safe_read_csv(c_path)
         return m_df, c_df
 
     master_df, cases_df = load_data()
 
+    if cases_df.empty:
+        st.error("症例データ(kanbetsu_cases.csv)が見つからないか、空です。")
+        return
+
     # --- 3. 患者選択と状態管理 ---
+    # ここで cases_df["case_id"] の KeyError を防ぐため、str.strip() 済みのカラムを使用
     target_id = st.sidebar.selectbox(
         "演習する症例を選択",
-        options=cases_df["case_id"].tolist() if not cases_df.empty else [1],
+        options=cases_df["case_id"].tolist(),
         format_func=lambda x: f"ID:{x}"
     )
 
@@ -2121,7 +2136,10 @@ def show_kanbetsu_practice():
             if any(key.startswith(prefix) for prefix in ["sb_", "ds_", "us_", "dy_", "rm_", "cm_"]):
                 del st.session_state[key]
 
+    # 症例の抽出
     selected_case = cases_df[cases_df["case_id"] == target_id].iloc[0]
+
+    # 鑑別データ構造の解析 (handbooksカラム)
     parts = selected_case["handbooks"].split(",")
     hospital_name = parts[0]
     raw_meds = parts[1].split("/")
@@ -2133,8 +2151,11 @@ def show_kanbetsu_practice():
             drug_full = m[0]
             drug_name = drug_full.split(".", 1)[1] if "." in drug_full else drug_full
             parsed_handbook.append({
-                "name": drug_name.strip(), "dose": m[1].strip(), "usage": m[2].strip(),
-                "days": m[3].strip(), "stock": m[4].strip()
+                "name": drug_name.strip(),
+                "dose": m[1].strip(),
+                "usage": m[2].strip(),
+                "days": m[3].strip(),
+                "stock": m[4].strip()
             })
 
     # --- 4. 上部UI：手帳参照と現物確認 ---
@@ -2162,8 +2183,12 @@ def show_kanbetsu_practice():
             st.session_state.target_med_idx += 1
             st.rerun()
 
-        # アイコン表示
-        stock_num = int(target_med['stock'])
+        # アイコン表示 (残薬数に応じて表示)
+        try:
+            stock_num = int(target_med['stock'])
+        except:
+            stock_num = 0
+
         icon = "💊" if "カプセル" in target_med['name'] else "⚪"
         icons_html = "".join(
             [f"<span style='font-size: 20px;'>{icon}</span>" + ("<br>" if (j + 1) % 10 == 0 else "") for j in
@@ -2174,20 +2199,22 @@ def show_kanbetsu_practice():
 
     st.divider()
 
-    # --- 5. 入力グリッドと「全項目」判定ロジック ---
+    # --- 5. 入力グリッド ---
     st.markdown("#### 【鑑別登録】")
 
     def calc_update(idx, mode):
         try:
             def get_val(key):
                 s = st.session_state.get(key, "0")
-                return float(''.join(filter(lambda x: x.isdigit() or x == '.', s))) if s else 0.0
+                if not s: return 0.0
+                return float(''.join(filter(lambda x: x.isdigit() or x == '.', str(s))))
 
             dose = get_val(f"ds_{idx}")
             if mode == "days":
                 st.session_state[f"rm_{idx}"] = str(int(dose * get_val(f"dy_{idx}")))
             elif mode == "rem":
-                st.session_state[f"dy_{idx}"] = str(int(get_val(f"rm_{idx}") / dose))
+                if dose > 0:
+                    st.session_state[f"dy_{idx}"] = str(int(get_val(f"rm_{idx}") / dose))
         except:
             pass
 
@@ -2202,7 +2229,8 @@ def show_kanbetsu_practice():
     ]
 
     h_cols = st.columns([0.5, 3.0, 0.8, 1.8, 0.7, 0.7, 1.5])
-    for col, label in zip(h_cols, ["No", "薬品名", "1日量", "用法", "日数", "残数", "全判定"]): col.write(f"**{label}**")
+    for col, label in zip(h_cols, ["No", "薬品名", "1日量", "用法", "日数", "残数", "全判定"]):
+        col.write(f"**{label}**")
 
     total_error_cells = 0
     mistake_log_details = []
@@ -2212,7 +2240,6 @@ def show_kanbetsu_practice():
         cols = st.columns([0.5, 3.0, 0.8, 1.8, 0.7, 0.7, 1.5])
         cols[0].write(f"{i + 1}")
 
-        # 各入力Widget
         u_name = cols[1].selectbox(f"drug_{i}", options=[""] + master_df["品名"].tolist(), label_visibility="collapsed",
                                    key=f"sb_{i}")
         u_dose = cols[2].text_input("量", label_visibility="collapsed", key=f"ds_{i}")
@@ -2222,15 +2249,11 @@ def show_kanbetsu_practice():
         u_rem = cols[5].text_input("残", label_visibility="collapsed", key=f"rm_{i}", on_change=calc_update,
                                    args=(i, "rem"))
 
-        # 判定ロジックの強化
         if st.session_state.get("show_results"):
             def norm(v):
-                # 単位を除去し、空文字の場合は比較不能な特殊文字を返して確実に不一致にする
                 val = str(v).strip().replace("錠", "").replace("g", "")
                 return val if val != "" else "EMPTY_VALUE_ERROR"
 
-            # 1つずつ個別に判定し、空欄も「不一致」にする
-            # 薬品名と用法はセレクトボックスなので空文字("")との比較
             err_list = []
             if u_name != ans["name"]: err_list.append("薬")
             if norm(u_dose) != norm(ans["dose"]): err_list.append("量")
@@ -2241,32 +2264,26 @@ def show_kanbetsu_practice():
             if not err_list:
                 cols[6].success("✅ Clear")
             else:
-                # 間違いがあった場合
                 cols[6].error(f"❌ {' '.join(err_list)}")
-                total_error_cells += len(err_list)  # 間違った項目の総数を加算
+                total_error_cells += len(err_list)
                 mistake_log_details.append(f"Rp{i + 1}:{''.join(err_list)}")
 
-    # 判定ボタン押下時の処理
     if st.button("🏁 判定して記録を保存", use_container_width=True, type="primary"):
         st.session_state.show_results = True
-
-        # ここで計算された total_error_cells が 0 より大きければ間違いとして記録される
         log_entry = pd.DataFrame([{
             "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
             "case_id": target_id,
-            "mistake_count": total_error_cells,  # ここが空欄分もしっかりカウントされる
+            "mistake_count": total_error_cells,
             "details": "|".join(mistake_log_details)
         }])
 
-        # ユーザーフォルダへの保存（ログインIDを厳格に使用）
-        user_id = st.session_state['user']['id']
         log_file = f"assets/users/{user_id}/kanbetsu_history.csv"
+        # 保存時も utf_8_sig で保存することで、次に開く時も文字化けしない
         log_entry.to_csv(log_file, mode='a', header=not os.path.exists(log_file), index=False, encoding="utf_8_sig")
         st.rerun()
 
-        # 関数の最後の方にあるボタンを修正
     if st.button("🏠 シミュレーションメニューに戻る", use_container_width=True):
-        st.session_state['sub_page'] = 'menu'  # ここで子ページをリセット
+        st.session_state['sub_page'] = 'menu'
         st.rerun()
 
 
