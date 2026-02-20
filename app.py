@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import csv
+import requests
 import random
 import re
 import datetime
@@ -9,6 +10,8 @@ import base64
 import shutil
 import time
 import io
+import urllib.parse
+import hashlib
 import plotly.express as px
 from collections import Counter
 
@@ -24,103 +27,295 @@ if not os.path.exists(LOGIN_FILE):
         writer = csv.writer(f)
         writer.writerow(["id", "name", "password", "role", "level", "exp", "points"])
 
-st.set_page_config(page_title="P-Quest", page_icon="💊", layout="wide")
 
-# --- 2. スタイル設定 (Tkinterのデザインを再現) ---
-st.markdown("""
-    <style>
-    /* 全体背景: 明るいグレー */
-    .main { background-color: #F8FAFC; color: #1E293B; }
+# ==========================================
+# 1. 低層エンジン（通信・ハッシュ）
+# ==========================================
+def github_sync_engine(local_path, mode="upload"):
+    """GitHubリポジトリにないファイルを反映させるための最終回答"""
+    try:
+        if "GITHUB_TOKEN" not in st.secrets or "GITHUB_REPO" not in st.secrets:
+            return False
 
-    /* ログインカードのデザイン */
-    .login-container {
-        background-color: white;
-        padding: 50px;
-        border-radius: 20px;
-        border: 1px solid #E2E8F0;
-        box-shadow: 0 10px 25px rgba(0,0,0,0.05);
-        text-align: center;
-        max-width: 500px;
-        margin: auto;
-    }
+        token = st.secrets["GITHUB_TOKEN"].strip()
+        repo = st.secrets["GITHUB_REPO"].strip()
 
-    /* タイトルとフォント設定 */
-    .title-text { font-family: 'Helvetica', sans-serif; font-size: 52px; font-weight: bold; color: #0F172A; margin-bottom: 0; }
-    .ver-text { font-family: 'Consolas', sans-serif; font-size: 16px; color: #64748B; margin-bottom: 20px; }
-    .badge { background-color: #F1F5F9; color: #64748B; padding: 5px 15px; border-radius: 5px; font-weight: bold; font-family: 'Consolas'; }
+        # --- [修正の核心] パスの正規化 ---
+        # 1. すべて小文字にして比較（GitHubの仕様に合わせる）
+        # 2. Windowsの区切り文字をスラッシュに
+        github_path = local_path.replace(os.sep, '/').lower().lstrip('/')
 
-    /* 入力ラベル */
-    .input-label { font-family: 'Meiryo', sans-serif; font-weight: bold; color: #475569; text-align: left; margin-top: 15px; }
+        url = f"https://api.github.com/repos/{repo}/contents/{github_path}"
 
-    /* ボタンのデザイン */
-    div.stButton > button {
-        background-color: #3B82F6 !important;
-        color: white !important;
-        border-radius: 8px !important;
-        font-size: 1.2rem !important;
-        font-weight: bold !important;
-        height: 3.5rem !important;
-        border: none !important;
-        transition: 0.3s;
-    }
-    div.stButton > button:hover { background-color: #2563EB !important; transform: translateY(-2px); }
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
 
-    /* 新規登録リンク */
-    .signup-link { color: #3B82F6; text-decoration: underline; cursor: pointer; font-size: 14px; }
+        if mode == "upload":
+            if not os.path.exists(local_path):
+                return False
 
-    /* 文字を大きく読みやすく */
-    input { font-size: 1.5rem !important; text-align: center !important; }
-    </style>
-    """, unsafe_allow_html=True)
-# --- 3. ロジック関数 ---
-import streamlit as st
+            # 既存ファイルのSHAを取得
+            res = requests.get(url, headers=headers)
+            sha = None
+            if res.status_code == 200:
+                sha = res.json().get("sha")
+
+            # ファイルをBase64変換
+            with open(local_path, "rb") as f:
+                content = base64.b64encode(f.read()).decode("utf-8")
+
+            # データ構築
+            data = {
+                "message": f"Sync: {github_path}",
+                "content": content,
+                "branch": "main"
+            }
+            if sha:
+                data["sha"] = sha
+
+            # 書き込み実行
+            put_res = requests.put(url, json=data, headers=headers)
+
+            if put_res.status_code in [200, 201]:
+                print(f"✅ 反映成功: {github_path}")
+                return True
+            else:
+                # 依然として404が出る場合、GitHub上のURLを直接叩く「強行手段」のログ
+                print(f"❌ 失敗({put_res.status_code}): {put_res.text}")
+                print(f"🔍 URL: {url}")
+                return False
+
+        elif mode == "download":
+            res = requests.get(url, headers=headers)
+            if res.status_code == 200:
+                content = base64.b64decode(res.json()["content"])
+                os.makedirs(os.path.dirname(os.path.abspath(local_path)), exist_ok=True)
+                with open(local_path, "wb") as f:
+                    f.write(content)
+                return True
+            return False
+
+    except Exception as e:
+        print(f"エンジン例外エラー: {e}")
+        return False
+# ==========================================
+# 共通UIヘルパー（中央プログレス表示）
+# ==========================================
+def render_sync_ui(title_text):
+    st.markdown("""
+        <style>
+        .sync-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.6); z-index: 9998;
+        }
+        .sync-modal {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: white; padding: 25px; border-radius: 15px;
+            z-index: 9999; text-align: center; width: 320px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+        .sync-modal .stProgress > div > div { background-color: #1E88E5; }
+        </style>
+        <div class="sync-overlay"></div>
+        <div class="sync-modal">
+            <h3 style='color: #333; margin-bottom: 20px;'>{title}</h3>
+        </div>
+    """.replace("{title}", title_text), unsafe_allow_html=True)
+    p_bar = st.progress(0)
+    p_text = st.empty()
+    return p_bar, p_text
+# ==========================================
+# 2. ロード処理
+# ==========================================
+def sync_all_assets_recursive(u_id, mode="download"):
+    try:
+        token = st.secrets["GITHUB_TOKEN"]
+        repo = st.secrets["GITHUB_REPO"]
+        headers = {"Authorization": f"token {token}"}
+        target_dirs = ["assets/spread_data", f"assets/users/{u_id}"]
+
+        def get_files_recursive(path):
+            res = requests.get(f"https://api.github.com/repos/{repo}/contents/{path}", headers=headers)
+            if res.status_code != 200: return []
+            files = []
+            for item in res.json():
+                if item["type"] == "file":
+                    files.append(item["path"])
+                elif item["type"] == "dir":
+                    files.extend(get_files_recursive(item["path"]))
+            return files
+
+        all_target_files = []
+        for directory in target_dirs:
+            all_target_files.extend(get_files_recursive(directory))
+
+        if all_target_files:
+            placeholder = st.empty()
+            with placeholder.container():
+                p_bar, p_text = render_sync_ui("📥 データを読込中")
+                total = len(all_target_files)
+                for i, f_path in enumerate(all_target_files):
+                    github_sync_engine(f_path, mode="download")
+                    percent = int((i + 1) / total * 100)
+                    p_bar.progress(percent)
+                    p_text.markdown(f"**{i + 1} / {total}** ({percent}%)")
+            placeholder.empty()
+    except Exception as e:
+        print(f"Recursive Load Error: {e}")
+# ==========================================
+# 3. セーブ処理
+# ==========================================
+def sync_user_assets(u_id, mode="upload"):
+    if not u_id or u_id == 'guest': return
+
+    token = st.secrets["GITHUB_TOKEN"]
+    repo = st.secrets["GITHUB_REPO"]
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+
+    target_folders = [f"assets/users/{u_id}", "assets/drive_data"]
+    files_to_save = []
+    for folder in target_folders:
+        if os.path.exists(folder):
+            for root, _, files in os.walk(folder):
+                for file in files:
+                    files_to_save.append(os.path.join(root, file))
+
+    if files_to_save:
+        placeholder = st.empty()
+        with placeholder.container():
+            p_bar, p_text = render_sync_ui("💾 データを保存中")
+            total = len(files_to_save)
+
+            for i, f_path in enumerate(files_to_save):
+                github_path = f_path.replace(os.sep, '/')
+                url = f"https://api.github.com/repos/{repo}/contents/{github_path}"
+
+                res = requests.get(url, headers=headers)
+                should_upload = False
+
+                if res.status_code == 404:
+                    print(f"💡 GitHub未存在のため新規追加判定: {github_path}")
+                    should_upload = True
+                elif res.status_code == 200:
+                    remote_content = res.json().get("content", "").replace("\n", "")
+                    with open(f_path, "rb") as f:
+                        local_content = base64.b64encode(f.read()).decode("ascii")
+                    if remote_content != local_content:
+                        print(f"💡 差分検知のため更新判定: {github_path}")
+                        should_upload = True
+
+                if should_upload:
+                    # エンジンの実行結果を受け取る
+                    success = github_sync_engine(f_path, mode="upload")
+                    if not success:
+                        print(f"⚠️ {github_path} のアップロードに失敗しました。")
+
+                percent = int((i + 1) / total * 100)
+                p_bar.progress(percent)
+                p_text.markdown(f"**{i + 1} / {total}** ({percent}%)")
+        placeholder.empty()
+
+st.set_page_config(page_title="P-Quest 浜松医療センター薬剤科", page_icon="💊", layout="centered")
+def get_image_base64(path):
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            data = f.read()
+        return base64.b64encode(data).decode()
+    return None
 def show_staff_confirmation_page():
-    st.title("🏥 浜松医療センター 薬剤科")
-    st.subheader("利用前の確認・同意")
+    hospital_img = get_image_base64("assets/image/img.png")
+    logo_img = get_image_base64("assets/image/file.png")
 
-    st.info("本システムは薬剤科職員の学習支援を目的としています。")
+    # CSSの定義
+    st.markdown(f"""
+        <style>
+        .stApp {{
+            background: url("data:image/png;base64,{hospital_img}");
+            background-size: cover;
+            background-position: center;
+        }}
 
-    # 薬剤科紹介リンク
-    url = "https://www.hmedc.or.jp/department/pharmacy/"
-    st.markdown(f"👉 [浜松医療センター 薬剤科の紹介はこちら]({url})")
+        /* ラベル（文字）を読みやすく */
+        .stTextInput label, .stCheckbox label {{
+            color: #1E293B !important;
+            font-weight: bold !important;
+        }}
 
-    st.write("---")
+        /* ボタンのカスタマイズ（緑色にする場合） */
+        div.stButton > button:first-child {{
+            background-color: #005243;
+            color: white;
+            border-radius: 10px;
+        }}
 
-    # --- 同意事項のセクション ---
-    st.markdown("#### 📝 学会発表等へのデータ利用に関する同意")
-    st.caption("""
-    職員として本システムを利用する場合、入力された研修結果や学習履歴は、
-    個人が特定されない形で統計的に処理した上で、**学会発表や論文等の研究データとして
-    利用させていただく可能性**があります。
-    """)
+        header, footer {{ visibility: hidden !important; }}
+        </style>
+    """, unsafe_allow_html=True)
 
-    # チェックボックス
-    agreed = st.checkbox("上記の内容を理解し、データの研究利用に同意します。")
+    # 画面の中央に配置するためのレイアウト調整
+    _, center_col, _ = st.columns([1, 2, 1])
 
-    st.write("---")
-    st.warning("あなたは薬剤科の職員ですか？")
+    with center_col:
+        # ここで1つの「箱」を開始
+        with st.container():
+            st.markdown('<div class="login-card">', unsafe_allow_html=True)
 
-    col1, col2 = st.columns(2)
+            # 1. ロゴとタイトル
+            if logo_img:
+                st.markdown(f'<img src="data:image/png;base64,{logo_img}" style="width:70px; margin-bottom:10px;">',
+                            unsafe_allow_html=True)
+            st.markdown("<h2 style='color:#1E293B; margin-bottom:0;'>P-Quest</h2>", unsafe_allow_html=True)
+            st.markdown("<p style='color:#64748B; font-size:14px;'>ver 1.0</p>", unsafe_allow_html=True)
+            st.markdown(
+                "<span style='background:#005243; color:white; padding:3px 12px; border-radius:10px; font-size:12px; font-weight:bold;'>職員認証・ログイン</span>",
+                unsafe_allow_html=True)
+            st.markdown("<div style='margin-bottom:25px;'></div>", unsafe_allow_html=True)
 
-    with col1:
-        # agreed が False の間は disabled=True になり、ボタンが押せません
-        if st.button("✅ はい（職員ログインへ）", use_container_width=True, disabled=not agreed):
-            st.session_state['is_staff_confirmed'] = True
-            st.session_state['is_guest'] = False
-            st.rerun()
+            # 2. 入力フォーム（ここも箱の中！）
+            u_id = st.text_input("職員番号", placeholder="半角6桁", key="login_id")
+            u_pw = st.text_input("パスワード", type="password", placeholder="数字4桁", key="login_pw")
 
-        # チェックしていない時に補足説明を出す（親切設計）
-        if not agreed:
-            st.caption("⚠️ 職員の方は同意にチェックを入れると進めます。")
+            st.markdown(
+                "<p style='font-size:11px; color:#64748B; text-align:left; margin-top:10px;'>【同意】データは研究等に利用される場合があります。</p>",
+                unsafe_allow_html=True)
+            agreed = st.checkbox("同意してログイン", value=True)
 
-    with col2:
-        # ゲストは同意不要で進める設定
-        if st.button("👤 いいえ（ゲストモード）", use_container_width=True):
-            st.session_state['is_staff_confirmed'] = False
-            st.session_state['is_guest'] = True
-            st.session_state['logged_in'] = True
-            st.session_state['page'] = 'main'
-            st.rerun()
+            if st.button("ログイン", use_container_width=True):
+                user = check_login(u_id, u_pw)
+                if user:
+                    st.session_state['logged_in'] = True
+                    st.session_state['user'] = user
+                    st.session_state['is_staff_confirmed'] = True
+                    st.rerun()
+                else:
+                    st.error("番号またはパスワードが違います")
+
+            # 3. ゲスト・新規登録ボタン
+            st.markdown("<hr style='margin: 20px 0; border:0; border-top:1px solid #eee;'>", unsafe_allow_html=True)
+            col_g, col_s = st.columns(2)
+            with col_g:
+                if st.button("👤 ゲスト", use_container_width=True):
+                    st.session_state['is_guest'] = True
+                    st.rerun()
+            with col_s:
+                if st.button("📝 新規登録", use_container_width=True):
+                    st.session_state['view'] = 'signup'  # 表示をsignupに切り替え
+                    st.session_state['is_staff_confirmed'] = True  # 最初のゲートを通過させる
+                    st.rerun()
+
+            # 4. 公式HPリンク
+            st.markdown(f"""
+                <div style="margin-top: 20px;">
+                    <a href="https://www.hmedc.or.jp/department/pharmacy/" target="_blank" 
+                       style="color:#005243; text-decoration:none; font-weight:bold; font-size:13px;">
+                       🏥 薬剤科 公式HP
+                    </a>
+                </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown('</div>', unsafe_allow_html=True)  # ここで箱を閉じる
 # --- ゲスト専用メニュー（任意） ---
 def show_guest_menu():
     """ゲスト用メイン画面（機能を制限したスリム版）"""
@@ -194,87 +389,6 @@ def register_user(user_id, user_name, user_pw):
     os.makedirs(os.path.join(USERS_BASE_DIR, user_id), exist_ok=True)
     return True, "登録が完了しました！"
 # --- 4. 画面表示関数 ---
-def show_login_page():
-    """ログイン画面（ユーザー環境の自動初期化機能付き）"""
-    # 画面中央に寄せるためのレイアウト
-    _, col, _ = st.columns([1, 1.2, 1])
-
-    with col:
-        # ヘッダーデザイン
-        st.markdown("""
-            <div class='login-container' style='text-align: center; margin-bottom: 20px;'>
-                <div class='title-text' style='font-size: 42px; font-weight: bold; color: #1E293B;'>P-Quest</div>
-                <div class='ver-text' style='color: #64748B;'>ver 1.0</div>
-                <span class='badge' style='background-color: #3B82F6; color: white; padding: 4px 12px; border-radius: 12px; font-size: 12px;'>SYSTEM LOGIN</span>
-            </div>
-        """, unsafe_allow_html=True)
-
-        # ログインフォーム
-        with st.form("login_form", clear_on_submit=False):
-            st.markdown("<p class='input-label' style='margin-bottom: -15px; font-weight: bold;'>職員番号</p>",
-                        unsafe_allow_html=True)
-            u_id = st.text_input("ID", label_visibility="collapsed", placeholder="半角6桁")
-
-            st.markdown(
-                "<p class='input-label' style='margin-bottom: -15px; font-weight: bold; margin-top: 10px;'>パスワード</p>",
-                unsafe_allow_html=True)
-            u_pw = st.text_input("PW", label_visibility="collapsed", type="password", placeholder="数字4桁")
-
-            # 入力候補・自動保存の抑制用JS（ブラウザの干渉を防ぐ）
-            st.components.v1.html("""
-                <script>
-                    const inputs = window.parent.document.querySelectorAll('input');
-                    inputs.forEach(input => {
-                        input.setAttribute('autocomplete', 'new-password');
-                        input.setAttribute('name', Math.random().toString(36));
-                    });
-                </script>
-            """, height=0)
-
-            # ログイン実行ボタン
-            submit = st.form_submit_button("ログイン", use_container_width=True)
-
-            if submit:
-                # 1. 認証チェック
-                user = check_login(u_id, u_pw)
-
-                if user:
-                    # 2. ユーザー環境（フォルダ・各CSVファイル）の自動生成
-                    # 初回ログイン時や、ファイルが足りない場合にここで作成される
-                    initialize_user_environment(user['id'])
-
-                    # 3. 数値データの型変換（CSVから読むと文字列になるため）
-                    if user['id'] != "admin":
-                        try:
-                            user['exp'] = int(user.get('exp', 0))
-                            user['level'] = int(user.get('level', 1))
-                        except (ValueError, TypeError):
-                            user['exp'] = 0
-                            user['level'] = 1
-
-                    # 4. セッション状態の確定
-                    st.session_state['logged_in'] = True
-                    st.session_state['user'] = user
-                    st.session_state['page'] = 'main'  # 明示的にメインへ
-
-                    st.success(f"ログイン成功：{user['name']} さん")
-                    time.sleep(0.5)  # 成功メッセージを見せるための僅かな待機
-                    st.rerun()
-                else:
-                    st.error("職員番号またはパスワードが正しくありません。")
-
-        # フォーム外のリンクボタン
-        st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
-        if st.button("▶ 初めての方・新規ユーザー登録はこちら", type="secondary", use_container_width=True):
-            st.session_state['view'] = 'signup'
-            st.rerun()
-
-        # フッター
-        st.markdown("""
-            <p style='color:#94A3B8; font-size:12px; margin-top:30px; text-align:center;'>
-                Powered by 浜松医療センター 薬剤科
-            </p>
-        """, unsafe_allow_html=True)
 def show_signup_page():
     """新規登録画面"""
     _, col, _ = st.columns([1, 1.2, 1])
@@ -290,7 +404,7 @@ def show_signup_page():
                     success, msg = register_user(new_id, new_name, new_pw)
                     if success:
                         st.success(msg)
-                        st.session_state['view'] = 'login'
+                        st.session_state['is_staff_confirmed'] = False
                         st.rerun()
                     else:
                         st.error(msg)
@@ -298,7 +412,7 @@ def show_signup_page():
                     st.warning("入力を確認してください。")
 
         if st.button("ログイン画面へ戻る"):
-            st.session_state['view'] = 'login'
+            st.session_state['is_staff_confirmed'] = False
             st.rerun()
 def initialize_user_environment(user_id):
     """新規ユーザー用のディレクトリと指定された5つの空CSVファイルを一括作成する"""
@@ -327,71 +441,125 @@ def initialize_user_environment(user_id):
         file_path = os.path.join(user_base_dir, filename)
         if not os.path.exists(file_path):
             pd.DataFrame(columns=columns).to_csv(file_path, index=False, encoding="utf_8_sig")
+def calculate_user_stats(u_id):
+    """my_all_results.csv を読み込み、難易度別に経験値、レベル、ポイントを算出する"""
+    results_path = f"assets/users/{u_id}/my_all_results.csv"
+    questions_path = "assets/spread_data/questions.csv"
+
+    total_exp = 0
+    total_points = 0
+
+    if not os.path.exists(results_path):
+        return 1, 0, 0
+
+    # 1. 難易度(レベル)のマスターデータを作成 {問題文: レベル}
+    q_level_map = {}
+    if os.path.exists(questions_path):
+        try:
+            with open(questions_path, mode="r", encoding="utf_8_sig") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    q_level_map[row["問題文"].strip()] = row["レベル"].strip()
+        except Exception as e:
+            print(f"質問マスタ読み込みエラー: {e}")
+
+    # 2. 履歴を走査して計算
+    try:
+        with open(results_path, mode="r", encoding="utf_8_sig") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                q_text = row.get("問題文", "").strip()
+                result = row.get("判定", "").strip()
+                lvl_str = q_level_map.get(q_text, "★")  # デフォルトは星1
+
+                # 難易度ごとの倍率設定
+                multiplier = 1.0
+                if lvl_str == "★★":
+                    multiplier = 1.5
+                elif lvl_str == "★★★":
+                    multiplier = 2.0
+                elif lvl_str == "★★★★":
+                    multiplier = 3.0
+
+                if result == "正解":
+                    total_exp += int(100 * multiplier)
+                    total_points += int(10 * multiplier)
+                elif result == "不正解":
+                    total_exp += int(20 * multiplier)
+    except Exception as e:
+        print(f"Stats計算エラー: {e}")
+
+    level = 1 + (total_exp // 1000)
+    current_exp = total_exp % 1000
+
+    return level, current_exp, total_points
 def show_main_menu():
-    """メイン画面（教育係対応スリムヘッダー版）"""
+    """メイン画面（難易度別の動的ステータス反映版）"""
     user = st.session_state['user']
+    u_id = user.get('id', 'default_user')
     role = user.get('role', '一般')
+
+    # 最新のステータスを計算
+    level, exp, points = calculate_user_stats(u_id)
 
     # --- 1. コンパクト・ヘッダー ---
     st.markdown("<div class='header-box'>", unsafe_allow_html=True)
-
-    # カラム比率を調整して右側のボタン領域を確保
     h_col1, h_col2, h_col3, h_col4 = st.columns([1.5, 1.2, 0.8, 2.5])
 
     with h_col1:
         badge_icon = "🎓" if role == "教育係" else "🔰"
         st.markdown(
-            f"<div class='user-info'>{badge_icon} {user['name']} <span class='level-label'>Lv.{user.get('level', 1)}</span></div>",
+            f"<div class='user-info'>{badge_icon} {user['name']} <span class='level-label'>Lv.{int(level)}</span></div>",
             unsafe_allow_html=True)
 
     with h_col2:
-        exp = int(user.get('exp', 0)) % 1000
         st.progress(exp / 1000)
         st.caption(f"EXP: {exp}/1000")
 
     with h_col3:
         st.markdown(
-            f"<div style='margin-top:5px;'><span class='point-label'>🪙 {int(user.get('points', 0))}</span></div>",
+            f"<div style='margin-top:5px;'><span class='point-label'>🪙 {int(points)}</span></div>",
             unsafe_allow_html=True)
 
     with h_col4:
-        # ボタンを並べるためのコンテナを開始
         st.markdown('<div class="compact-btn-container">', unsafe_allow_html=True)
-
-        # 内部でさらに細かいカラムを作ってボタンを配置（これで横並びを担保）
         btn_count = 4 if role == "教育係" else 3
         inner_cols = st.columns(btn_count)
 
         col_idx = 0
-
-        # 1. 進捗ボタン（教育係のみ）
         if role == "教育係":
             with inner_cols[col_idx]:
-                # 教育係ボタンだけ紫にするためのクラスを適用
-                st.markdown('<div class="mentor-btn">', unsafe_allow_html=True)
                 if st.button("👥 進捗", key="h_mentor", use_container_width=True):
                     st.session_state['page'] = 'mentor_dashboard'
                     st.rerun()
-                st.markdown('</div>', unsafe_allow_html=True)
             col_idx += 1
 
-        # 2. 検索ボタン
         with inner_cols[col_idx]:
-            # width='stretch' に変更し、ページ遷移のロジックを追加
-            if st.button("🔍 検索", key="search", type="secondary", width='stretch'):
-                st.session_state['page'] = 'search'  # 遷移先を指定
-                st.rerun()  # 画面を再描画して遷移を確定させる
+            if st.button("🔍 検索", key="search", type="secondary", use_container_width=True):
+                st.session_state['page'] = 'search'
+                st.rerun()
         col_idx += 1
 
-        # 4. 終了ボタン
+        with inner_cols[col_idx]:
+            if st.button("📊 履歴", key="h_history", type="secondary", use_container_width=True):
+                st.session_state['page'] = 'review'
+                st.rerun()
+        col_idx += 1
+
         with inner_cols[col_idx]:
             if st.button("🚪 終了", key="h_logout", type="secondary", use_container_width=True):
+                u_id = st.session_state['user'].get('id')
+                if u_id and u_id != 'guest':
+                    # セッションをクリアする前にGitHubへ保存
+                    with st.spinner("保存中..."):
+                        sync_user_assets(u_id, mode="upload")
+
+                # 保存が終わってからクリアとリラン
                 st.session_state.clear()
                 st.rerun()
-
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # --- 2. メインメニュー（カードはそのまま） ---
+    # --- 2. メインメニュー（カード） ---
     st.markdown("<h3 style='text-align: center; margin-bottom: 25px; color: #475569;'>MENU</h3>",
                 unsafe_allow_html=True)
 
@@ -401,7 +569,7 @@ def show_main_menu():
         {"title": "📝 問題演習", "id": "quiz", "col": m_col2},
         {"title": "❓ 掲示板", "id": "board", "col": m_col3},
         {"title": "📖 勉強会資料", "id": "meeting", "col": m_col1},
-       {"title": "💻 シミュレーション", "id": "simulation", "col": m_col2},
+        {"title": "💻 シミュレーション", "id": "simulation", "col": m_col2},
         {"title": "📔 業務日誌", "id": "diary", "col": m_col3},
     ]
 
@@ -640,20 +808,6 @@ def show_quiz_page():
         else:
             st.markdown("### 📊 復習・統計")
             show_review_page()
-def run_quiz(category, mode="normal"):
-    """
-    クイズを開始するためのセッション状態をセットアップする関数
-    """
-    st.session_state.quiz_started = True
-    st.session_state.current_index = 0
-    st.session_state.correct_count = 0
-    st.session_state.test_target = category
-    st.session_state.quiz_mode = mode
-    # 記述問題などの一時的な状態もリセット
-    st.session_state.show_feedback = False
-    st.session_state.show_self_check = False
-    st.session_state.test_recorded = False
-    st.rerun()
 def display_category_cards(main_cat, subs):
     """カテゴリー内のカード表示ロジック"""
     st.markdown(f"## {main_cat}")
@@ -691,6 +845,21 @@ def display_category_cards(main_cat, subs):
                     st.write(f"**{name}**")
                     if st.button("開始", key=f"cat_{name}", use_container_width=True):
                         run_quiz(name, mode="normal")
+def run_quiz(category, mode="normal"):
+    """
+    クイズを開始するためのセッション状態をセットアップする関数
+    """
+    st.session_state.quiz_started = True
+    st.session_state.current_index = 0
+    st.session_state.correct_count = 0
+    st.session_state.test_target = category
+    st.session_state.quiz_mode = mode
+    # 記述問題などの一時的な状態もリセット
+    st.session_state.show_feedback = False
+    st.session_state.show_self_check = False
+    st.session_state.test_recorded = False
+    st.rerun()
+
 @st.dialog("🚀 テスト設定")
 def show_test_settings_dialog(category_name):
     st.write(f"**カテゴリー:** {category_name}")
@@ -879,10 +1048,34 @@ def show_quiz_engine():
     st.write("")
     # 回答用UIの呼び出し
     display_answer_ui(q)
+
+def get_question_priorities(u_id):
+    """
+    ユーザーの履歴を読み込み、問題ごとの最新の結果をスコアリングする。
+    未出題: 0, 不正解: 1, 正解: 2
+    """
+    history_path = f"assets/users/{u_id}/my_all_results.csv"
+    priorities = {}  # {問題文: 判定スコア}
+
+    if not os.path.exists(history_path):
+        return priorities
+
+    try:
+        with open(history_path, mode="r", encoding="utf_8_sig") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                q_text = row["問題文"]
+                result = row["判定"]
+                # 履歴を上書きしていき、最新の結果を反映させる
+                priorities[q_text] = 1 if result == "不正解" else 2
+    except Exception as e:
+        print(f"履歴読み込みエラー: {e}")
+
+    return priorities
 def setup_quiz_data():
-    """クイズデータをCSVから読み込み、セッションにセットする"""
+    """クイズデータをCSVから読み込み、モードに応じた優先順位でセッションにセットする"""
     print("\n" + "=" * 40)
-    print("🚀 [ENTER] setup_quiz_data を実行します")
+    print("🚀 setup_quiz_data を実行します")
     print("=" * 40)
 
     # 1. パスの解決
@@ -895,87 +1088,147 @@ def setup_quiz_data():
     clean_target = re.sub(r'[^\w・]', '', raw_target).strip()
 
     print(f"DEBUG: 検索キーワード -> '{clean_target}'")
-    print(f"DEBUG: 読み込みパス -> {path}")
 
     if not os.path.exists(path):
-        print(f"❌ エラー: ファイルが存在しません: {path}")
         st.error(f"CSVファイルが見つかりません: {path}")
         return
 
     all_q = []
     try:
-        # UTF-8 BOM付き(utf_8_sig)で読み込み
         with open(path, mode="r", encoding="utf_8_sig") as f:
             r = csv.reader(f)
             header = next(r, None)  # ヘッダーをスキップ
 
-            for i, row in enumerate(r):
+            for row in r:
                 if len(row) < 2:
                     continue
 
-                # CSV側のデータ（1列目:大項目, 2列目:小項目）
                 csv_major = row[0].strip()
                 csv_minor = row[1].strip()
 
-                # 部分一致(in)で判定（「調剤」が含まれていればOK）
+                # カテゴリー一致判定
                 if clean_target in csv_major or clean_target in csv_minor:
                     all_q.append(row)
 
-                # 最初の数行だけ中身をターミナルに出して確認
-                if i < 5:
-                    print(f"DEBUG: CSV {i + 1}行目確認 -> 大:[{csv_major}] 小:[{csv_minor}]")
-
     except Exception as e:
-        print(f"❌ 例外発生: {e}")
         st.error(f"読み込みエラーが発生しました: {e}")
         return
 
-    # 3. 結果の判定とセッションへの保存
+    # 3. 結果の判定
     if not all_q:
-        print(f"⚠️ 一致する問題がゼロでした（検索語: {clean_target}）")
-        st.error(f"「{clean_target}」に一致する問題がありませんでした。CSVの文字を確認してください。")
+        st.error(f"「{clean_target}」に一致する問題がありませんでした。")
         st.session_state.quiz_started = False
-        # 0件のときは rerun せずに止める
-    else:
-        print(f"✅ ヒットしました！ 合計 {len(all_q)} 件中 10件を選択します。")
-        # セッション状態を更新
-        st.session_state.questions = random.sample(all_q, min(len(all_q), 10))
-        st.session_state.quiz_started = True
-        st.session_state.quiz_finished = False
-        st.session_state.current_index = 0
-        st.session_state.correct_count = 0
+        return
 
-        print(f"✅ セットアップ完了。アプリをリロードします。")
-        st.rerun()
+    # --- モードに応じた出題ロジック ---
+    mode = st.session_state.get('quiz_mode', 'normal')
+
+    if mode == "test":
+        # 【テストモード】完全ランダム
+        selected_questions = random.sample(all_q, min(len(all_q), 10))
+        print("🎲 モード: テスト (完全ランダム)")
+    else:
+        # 【通常モード】未出題(0) > 不正解(1) > 正解(2) の優先順
+        u_id = st.session_state['user'].get('id', 'guest')
+        history_scores = get_question_priorities(u_id)
+
+        scored_questions = []
+        for q in all_q:
+            q_text = q[4]  # 問題文
+            score = history_scores.get(q_text, 0)  # 履歴がなければ0
+            scored_questions.append((score, q))
+
+        # 同じスコア内でのランダム性を確保してソート
+        random.shuffle(scored_questions)
+        scored_questions.sort(key=lambda x: x[0])
+
+        selected_questions = [x[1] for x in scored_questions[:10]]
+        print("🧠 モード: 通常 (苦手・未出題優先)")
+
+    # 4. セッション状態の更新
+    st.session_state.questions = selected_questions
+    st.session_state.quiz_started = True
+    st.session_state.quiz_finished = False
+    st.session_state.current_index = 0
+    st.session_state.correct_count = 0
+
+    print(f"✅ セットアップ完了: {len(selected_questions)}問を抽出")
+    st.rerun()
+
+
+def process_answer(user_ans, correct_data, q, is_written=False, written_text=None, display_ans_text=None):
+    """
+    正誤判定とステート更新、および履歴保存の実行
+    """
+    # 1. 正解データの抽出（CSV側の正解：番号またはテキスト）
+    # 4択の場合はここが「1」〜「4」になる想定
+    display_correct_ans = correct_data.split("|")[0] if "|" in correct_data else correct_data
+
+    # 2. 正誤判定のロジック
+    if is_written:
+        # 記述式：ユーザーの自己申告(True/False)
+        is_ok = user_ans
+        actual_save_ans = written_text if written_text else "テキスト入力あり"
+    else:
+        # 選択式（〇×・4択）
+        # user_ans に判定用の値（4択なら番号）、display_ans_text に保存用のテキストが入る
+        is_ok = (str(user_ans).strip() == str(display_correct_ans).strip())
+
+        # 保存用テキストが別途指定されていればそれを使う（4択用）
+        actual_save_ans = display_ans_text if display_ans_text else user_ans
+
+    # 3. ステート（セッション状態）の更新
+    st.session_state.last_result = is_ok
+    st.session_state.show_feedback = True
+    if is_ok:
+        st.session_state.correct_count += 1
+
+    # 4. 履歴の保存
+    # 4択の場合、CSVの「正解」列には番号ではなく、選択肢の文章を保存したい場合はここで調整可能
+    # 今回は既存のロジックを維持し、CSVの正解列はそのまま correct_data の先頭を出力します
+    save_quiz_history(q, actual_save_ans, display_correct_ans, is_ok)
+
+    st.rerun()
 def display_answer_ui(q):
+    """
+    回答用UI（〇×、4択、記述）の表示
+    """
     # すでに回答済みで、フィードバック（解説）待機中の場合
     if st.session_state.get('show_feedback'):
         display_feedback(q)
         return
 
-    # --- 以下、通常の回答UI（○×、4択、記述） ---
+    # --- 以下、通常の回答UI ---
     q_type = q[2]
     correct_data = q[5]
     explanation = q[6] if len(q) > 6 else "なし"
+    current_idx = st.session_state.get('current_index', 0)
 
+    # 1. 〇×問題
     if q_type == "〇×問題":
         cols = st.columns(2)
-        if cols[0].button("⭕ 〇", use_container_width=True):
+        if cols[0].button("⭕ 〇", use_container_width=True, key=f"btn_true_{current_idx}"):
             process_answer("〇", correct_data, q)
-        if cols[1].button("❌ ×", use_container_width=True):
+        if cols[1].button("❌ ×", use_container_width=True, key=f"btn_false_{current_idx}"):
             process_answer("×", correct_data, q)
 
+    # 2. 4択問題
     elif "4択問題" in q_type:
         options = correct_data.split("|")
-        # 1:正解, 2:選択肢1, 3:選択肢2, 4:選択肢3, 5:選択肢4 という構造を想定
+        # 構造想定: options[0]=正解番号(1-4), options[1:5]=選択肢1〜4の文章
         choices = options[1:5]
-        for i, choice in enumerate(choices):
-            if st.button(f"{i + 1}. {choice}", use_container_width=True):
-                process_answer(str(i + 1), correct_data, q)
 
-    else:  # 記述問題
-        user_ans = st.text_input("回答を入力してください", key=f"q_{st.session_state.current_index}")
-        if st.button("回答を送信"):
+        for i, choice in enumerate(choices):
+            # 修正ポイント：
+            # user_ans(第1引数) には判定用の「番号(1-4)」を渡す
+            # display_ans_text(追加引数) には保存用の「文章」を渡す
+            if st.button(f"{i + 1}. {choice}", use_container_width=True, key=f"btn_choice_{current_idx}_{i}"):
+                process_answer(str(i + 1), correct_data, q, display_ans_text=choice)
+
+    # 3. 記述問題
+    else:
+        user_ans = st.text_input("回答を入力してください", key=f"q_input_{current_idx}")
+        if st.button("回答を送信", key=f"btn_submit_{current_idx}"):
             st.session_state.temp_ans = user_ans
             st.session_state.show_self_check = True
 
@@ -984,31 +1237,13 @@ def display_answer_ui(q):
                 st.write(f"あなたの回答: **{st.session_state.temp_ans}**")
                 st.write(f"模範解答: **{correct_data}**")
                 st.info(f"【解説】\n{explanation}")
+
                 c1, c2 = st.columns(2)
-                if c1.button("✅ 正解にする"): process_answer(True, correct_data, q, is_written=True)
-                if c2.button("❌ 不正解にする"): process_answer(False, correct_data, q, is_written=True)
-def process_answer(user_ans, correct_data, q, is_written=False):
-    """正誤判定とステート更新、および履歴保存の実行"""
-    # 1. 正誤判定のロジック
-    if is_written:
-        is_ok = user_ans  # 記述式はユーザーの自己申告(True/False)
-    else:
-        # 4択などは correct_data の最初の要素が正解
-        ans = correct_data.split("|")[0] if "|" in correct_data else correct_data
-        is_ok = (str(user_ans).strip() == str(ans).strip())
+                if c1.button("✅ 正解にする", key=f"btn_ok_{current_idx}"):
+                    process_answer(True, correct_data, q, is_written=True, written_text=st.session_state.temp_ans)
+                if c2.button("❌ 不正解にする", key=f"btn_ng_{current_idx}"):
+                    process_answer(False, correct_data, q, is_written=True, written_text=st.session_state.temp_ans)
 
-    # 2. セッション状態の更新
-    st.session_state.last_result = is_ok
-    st.session_state.show_feedback = True
-    if is_ok:
-        st.session_state.correct_count += 1
-
-    # ★ 3. 履歴の保存を実行！
-    # correct_dataから表示用の正解テキストを抽出
-    display_correct_ans = correct_data.split("|")[0] if "|" in correct_data else correct_data
-    save_quiz_history(q, user_ans, display_correct_ans, is_ok)
-
-    st.rerun()
 def display_feedback(q):
     """解説画面に『関連資料』へのリンクを表示"""
     is_ok = st.session_state.last_result
@@ -1117,8 +1352,9 @@ def save_quiz_history(q, user_ans, correct_ans, is_ok):
         print(f"✅ CSV保存完了: {path}")  # ターミナルで確認用
     except Exception as e:
         print(f"❌ CSV保存失敗: {e}")
+
 def show_review_page():
-    """📊 学習履歴・復習・統計画面（総問題数表示・タブ整理版）"""
+    """📊 学習履歴・復習・統計画面（状態保持・プレビュー強化版）"""
     st.markdown("# 📊 学習履歴と復習")
 
     u_id = st.session_state.get('user', {}).get('id', 'default_user')
@@ -1131,7 +1367,14 @@ def show_review_page():
     RESULTS_CSV = os.path.join(user_dir, "my_all_results.csv")
     TEST_RESULTS_CSV = os.path.join(user_dir, "my_test_results.csv")
 
-    # --- 1. 個人成績データの読み込みと集計 ---
+    # --- 1. フィルター状態の保持用初期化 ---
+    if 'filter_maj' not in st.session_state: st.session_state.filter_maj = "すべて"
+    if 'filter_min' not in st.session_state: st.session_state.filter_min = "すべて"
+    if 'filter_lvl' not in st.session_state: st.session_state.filter_lvl = "すべて"
+    if 'filter_f_res' not in st.session_state: st.session_state.filter_f_res = "すべて"
+    if 'filter_l_res' not in st.session_state: st.session_state.filter_l_res = "すべて"
+
+    # --- 2. 成績データの読み込みと集計 ---
     stats = {}
     if os.path.exists(RESULTS_CSV):
         try:
@@ -1139,16 +1382,19 @@ def show_review_page():
                 r = csv.reader(f)
                 next(r, None)  # ヘッダー飛ばし
                 for row in r:
-                    if len(row) >= 4:
+                    if len(row) >= 6:
                         res = row[2].strip()  # 判定
                         q_text = row[3].strip()  # 問題文
+                        my_ans = row[4].strip()  # 自分の回答
+
                         if q_text not in stats:
-                            stats[q_text] = []
-                        stats[q_text].append(res)
+                            stats[q_text] = {"res": [], "ans": []}
+                        stats[q_text]["res"].append(res)
+                        stats[q_text]["ans"].append(my_ans)
         except Exception as e:
             st.error(f"成績データの読み込みに失敗しました: {e}")
 
-    # --- 2. フィルター用サイドバー ---
+    # --- 3. フィルター用サイドバー（状態保持版） ---
     with st.sidebar:
         st.markdown("### 🔍 フィルター設定")
         sub_categories = {
@@ -1158,13 +1404,34 @@ def show_review_page():
                       "血液及び造血器疾患", "感覚器疾患", "内分泌・代謝疾患", "皮膚疾患",
                       "感染症", "悪性腫瘍", "その他"]
         }
-        maj_cat = st.selectbox("大カテゴリー", ["すべて"] + list(sub_categories.keys()))
-        min_options = sub_categories.get(maj_cat, ["すべて"]) if maj_cat != "すべて" else ["すべて"]
-        min_cat = st.selectbox("小カテゴリー", min_options)
-        level_filter = st.selectbox("難易度", ["すべて", "★", "★★", "★★★", "★★★★"])
-        result_filter = st.selectbox("最新成績で絞り込み", ["すべて", "正解", "不正解", "未回答"])
 
-    # --- 3. メインコンテンツ（2タブ構成に変更） ---
+        st.session_state.filter_maj = st.selectbox("大カテゴリー", ["すべて"] + list(sub_categories.keys()),
+                                                   index=(["すべて"] + list(sub_categories.keys())).index(
+                                                       st.session_state.filter_maj))
+
+        min_options = sub_categories.get(st.session_state.filter_maj,
+                                         ["すべて"]) if st.session_state.filter_maj != "すべて" else ["すべて"]
+        # 小カテゴリーの整合性チェック
+        if st.session_state.filter_min not in min_options: st.session_state.filter_min = "すべて"
+
+        st.session_state.filter_min = st.selectbox("小カテゴリー", min_options,
+                                                   index=min_options.index(st.session_state.filter_min))
+
+        lvls = ["すべて", "★", "★★", "★★★", "★★★★"]
+        st.session_state.filter_lvl = st.selectbox("難易度", lvls, index=lvls.index(st.session_state.filter_lvl))
+
+        results_opts = ["すべて", "正解", "不正解", "未回答"]
+        st.session_state.filter_f_res = st.selectbox("初回成績で絞り込み", results_opts,
+                                                     index=results_opts.index(st.session_state.filter_f_res))
+        st.session_state.filter_l_res = st.selectbox("最新成績で絞り込み", results_opts,
+                                                     index=results_opts.index(st.session_state.filter_l_res))
+
+        if st.button("フィルターをリセット"):
+            for key in ['filter_maj', 'filter_min', 'filter_lvl', 'filter_f_res', 'filter_l_res']:
+                st.session_state[key] = "すべて"
+            st.rerun()
+
+    # --- 4. メインコンテンツ ---
     tab1, tab2 = st.tabs(["📖 問題管理・統計", "🏆 テスト履歴"])
 
     with tab1:
@@ -1172,89 +1439,96 @@ def show_review_page():
             st.error("問題データが見つかりません。")
         else:
             df_q = pd.read_csv(QUESTIONS_CSV, encoding="utf_8_sig")
-            total_questions_count = len(df_q)  # 全問題数
+            total_questions_count = len(df_q)
 
             display_data = []
             for _, row in df_q.iterrows():
                 q_txt = str(row["問題文"]).strip()
-                h = stats.get(q_txt, [])
+                h = stats.get(q_txt, {"res": [], "ans": []})
+                results = h["res"]
+                answers = h["ans"]
 
-                first_res = h[0] if h else "未回答"
-                latest_res = h[-1] if h else "未回答"
+                first_res = results[0] if results else "未回答"
+                latest_res = results[-1] if results else "未回答"
+                first_ans = answers[0] if answers else "-"
+                latest_ans = answers[-1] if answers else "-"
+                total_tries = len(results)
+                accuracy_rate = f"{int((results.count('正解') / total_tries) * 100)}%" if total_tries > 0 else "0%"
 
                 # フィルター適用
-                if maj_cat != "すべて" and str(row["大項目"]) != maj_cat: continue
-                if min_cat != "すべて" and str(row["小項目"]) != min_cat: continue
-                if level_filter != "すべて" and str(row["レベル"]) != level_filter: continue
-                if result_filter != "すべて" and latest_res != result_filter: continue
+                if st.session_state.filter_maj != "すべて" and str(row["大項目"]) != st.session_state.filter_maj: continue
+                if st.session_state.filter_min != "すべて" and str(row["小項目"]) != st.session_state.filter_min: continue
+                if st.session_state.filter_lvl != "すべて" and str(row["レベル"]) != st.session_state.filter_lvl: continue
+                if st.session_state.filter_f_res != "すべて" and first_res != st.session_state.filter_f_res: continue
+                if st.session_state.filter_l_res != "すべて" and latest_res != st.session_state.filter_l_res: continue
 
                 display_data.append({
-                    "大項目": row["大項目"],
-                    "小項目": row["小項目"],
-                    "レベル": row["レベル"],
-                    "問題文": q_txt,
-                    "初回成績": first_res,
-                    "最新成績": latest_res,
-                    "回答回数": len(h),
-                    "解答": row["解答"],
-                    "解説": row["解説"]
+                    "大項目": row["大項目"], "小項目": row["小項目"], "レベル": row["レベル"],
+                    "問題文": q_txt, "初回成績": first_res, "初回回答": first_ans,
+                    "最新成績": latest_res, "最新回答": latest_ans,
+                    "回答回数": total_tries, "正答率": accuracy_rate,
+                    "解答": row["解答"], "解説": row["解説"]
                 })
 
             if display_data:
                 res_df = pd.DataFrame(display_data)
 
-                # --- 統計メトリクスのアップデート ---
                 col_m1, col_m2, col_m3 = st.columns(3)
                 overcome_count = len(res_df[(res_df["初回成績"] == "不正解") & (res_df["最新成績"] == "正解")])
                 answered_count = len(res_df[res_df['最新成績'] != '未回答'])
-
                 col_m1.metric("弱点克服数", f"{overcome_count} 問")
-                col_m2.metric("総解答数 / 全問題数", f"{answered_count} / {total_questions_count}")
-                # 進捗率を％で表示
+                col_m2.metric("既習問題数 / 全問題数", f"{answered_count} / {total_questions_count}")
                 progress_percent = int(
                     (answered_count / total_questions_count) * 100) if total_questions_count > 0 else 0
                 col_m3.metric("学習進捗率", f"{progress_percent} %")
 
                 st.subheader("📋 復習対象の選択")
-
-                selected_event = st.dataframe(
-                    res_df[["大項目", "小項目", "レベル", "問題文", "初回成績", "最新成績", "回答回数"]],
-                    width='stretch',
-                    hide_index=True,
-                    on_select="rerun",
-                    selection_mode="multi-row"
-                )
-
+                view_cols = ["大項目", "小項目", "レベル", "問題文", "初回成績", "初回回答", "最新成績", "最新回答", "回答回数", "正答率"]
+                selected_event = st.dataframe(res_df[view_cols], width='stretch', hide_index=True, on_select="rerun",
+                                              selection_mode="multi-row")
                 selected_rows = selected_event.selection.rows
 
                 c_btn1, c_btn2 = st.columns(2)
                 with c_btn1:
-                    if st.button(f"🔄 選択した {len(selected_rows)} 問を復習", width='stretch', type="primary",
+                    if st.button(f"🔄 選択した {len(selected_rows)} 問を復習", use_container_width=True, type="primary",
                                  disabled=len(selected_rows) == 0):
+                        # 復習用セッションのセットアップ
                         selected_q_texts = res_df.iloc[selected_rows]["問題文"].tolist()
-                        target_questions = df_q[df_q["問題文"].isin(selected_q_texts)].values.tolist()
-                        st.session_state.questions = target_questions
+                        st.session_state.questions = df_q[df_q["問題文"].isin(selected_q_texts)].values.tolist()
                         st.session_state.quiz_started = True
+                        st.session_state.quiz_finished = False  # ここが重要
                         st.session_state.current_index = 0
-                        st.session_state.quiz_mode = "manual_review"
+                        st.session_state.correct_count = 0
+                        st.session_state.page = "quiz"  # ページ遷移を明示
                         st.rerun()
 
                 with c_btn2:
-                    if st.button("📖 表示中の全問題を復習", width='stretch'):
-                        target_questions = df_q[df_q["問題文"].isin(res_df["問題文"])].values.tolist()
-                        st.session_state.questions = target_questions
+                    if st.button("📖 表示中の全問題を復習", use_container_width=True):
+                        st.session_state.questions = df_q[df_q["問題文"].isin(res_df["問題文"])].values.tolist()
                         st.session_state.quiz_started = True
+                        st.session_state.quiz_finished = False
                         st.session_state.current_index = 0
-                        st.session_state.quiz_mode = "filter_review"
+                        st.session_state.correct_count = 0
+                        st.session_state.page = "quiz"
                         st.rerun()
 
+                # --- 5. プレビューの強化 ---
                 if len(selected_rows) == 1:
                     st.divider()
                     q_detail = res_df.iloc[selected_rows[0]]
                     with st.container(border=True):
                         st.markdown(f"### 🔍 問題プレビュー\n**{q_detail['問題文']}**")
+
+                        p_col1, p_col2 = st.columns(2)
+                        with p_col1:
+                            st.write(f"🔹 **初回:** {q_detail['初回成績']} ({q_detail['初回回答']})")
+                            st.write(f"🔹 **最新:** {q_detail['最新成績']} ({q_detail['最新回答']})")
+                        with p_col2:
+                            st.write(f"📈 **正答率:** {q_detail['正答率']}")
+                            st.write(f"🔢 **回答回数:** {q_detail['回答回数']} 回")
+
                         if q_detail['最新成績'] != "未回答":
-                            st.success(f"**【解答】**\n{q_detail['解答']}")
+                            st.success(f"**【模範解答】**\n{q_detail['解答']}")
                             st.info(f"**【解説】**\n{q_detail['解説']}")
             else:
                 st.info("条件に一致するデータがありません。")
@@ -2071,8 +2345,6 @@ def show_simulation_page():
     # 3. レジメン監査ページ
     elif st.session_state['sub_page'] == 'regimen':
         show_regimen_simulation() # 新規作成
-
-
 def show_kanbetsu_practice():
     # --- 1. 厳格なユーザー特定 ---
     if 'user' not in st.session_state or not st.session_state['user'].get('id'):
@@ -2285,8 +2557,6 @@ def show_kanbetsu_practice():
     if st.button("🏠 シミュレーションメニューに戻る", use_container_width=True):
         st.session_state['sub_page'] = 'menu'
         st.rerun()
-
-
 def show_regimen_simulation():
     # --- 1. スタイル定義 ---
     st.markdown("""
@@ -2465,102 +2735,92 @@ def main():
         return
 
     if st.session_state['is_staff_confirmed'] and not st.session_state['logged_in']:
-        if st.session_state['view'] == 'login':
-            show_login_page()
-        else:
+        if st.session_state['view'] == 'signup':
             show_signup_page()
+        else:
+            show_staff_confirmation_page()
         return
 
-    # --- 3. 共通ナビゲーション設定 ---
+    # --- 【重要追加】ログイン直後のGitHubデータロード ---
+    if st.session_state['logged_in'] and not st.session_state.get('github_loaded', False):
+        u_id = st.session_state['user'].get('id')
+        if u_id and u_id != 'guest':
+            with st.status("📥 データを同期中...", expanded=False) as status:
+                # 引数に u_id を追加
+                sync_all_assets_recursive(u_id, mode="download")
+                status.update(label="✅ 同期完了", state="complete")
+
+            st.session_state['github_loaded'] = True
+            st.rerun()
+
+    # --- 3. 共通ナビゲーション ---
     current_page = st.session_state['page']
     u_role = str(st.session_state.get('user', {}).get('role', '一般'))
-    # 管理者、教育係、メンターのいずれかであれば教育者権限ありとみなす
     is_mentor_staff = any(r in u_role for r in ["管理者", "教育係", "メンター"])
 
-    # メイン画面以外でのサイドバー処理
     if current_page != 'main':
         with st.sidebar:
             st.markdown("---")
-            # use_container_width=True でボタン幅を調整
             if st.button("🏠 メインメニューへ", use_container_width=True):
-                # ページ移動時に各ページの状態をリセット
                 st.session_state['page'] = 'main'
-
-                # 【修正ポイント】シミュレーション内の階層をリセット
-                if 'sub_page' in st.session_state:
-                    st.session_state['sub_page'] = 'menu'
-
+                if 'sub_page' in st.session_state: st.session_state['sub_page'] = 'menu'
                 st.session_state['quiz_started'] = False
                 st.session_state.forum_view = "list"
                 st.session_state.temp_title = ""
-                # メンター用の選択状態や詳細表示フラグもリセット
-                if "selected_mentor_user" in st.session_state:
-                    del st.session_state["selected_mentor_user"]
-                if "show_detail" in st.session_state:
-                    st.session_state.show_detail = False
+                if "selected_mentor_user" in st.session_state: del st.session_state["selected_mentor_user"]
+                if "show_detail" in st.session_state: st.session_state.show_detail = False
                 st.rerun()
 
     # --- 4. ページ分岐ロジック ---
-
-    # A. ホーム
     if current_page == 'main':
         if st.session_state['is_guest']:
             show_guest_menu()
         else:
+            # メインメニュー内で「終了」ボタンが押された際の同期は show_main_menu 内に記述
             show_main_menu()
 
-    # B. 参考資料
     elif current_page == 'study':
         show_study_page()
 
-    # C. 学習・クイズ
     elif current_page == 'quiz':
         if st.session_state.get('quiz_started'):
             show_quiz_engine()
         else:
             show_quiz_page()
 
-    # D. 学習履歴
     elif current_page == 'review':
         if st.session_state['is_guest']:
             st.warning("ゲストモードでは履歴機能は利用できません。")
         else:
             show_review_page()
 
-    # E. 掲示板
     elif current_page == 'board':
         if st.session_state['is_guest']:
             st.error("この機能は職員専用です。")
         else:
             show_message_hub()
 
-    # F. 勉強会資料
     elif current_page == 'meeting':
         show_meeting_page()
 
-    # G. 業務日誌
     elif current_page == 'diary':
         if st.session_state['is_guest']:
             st.error("ゲストモードでは日誌機能は利用できません。")
         else:
             show_diary_page()
 
-    # H. 統合検索
     elif current_page == 'search':
         show_search_page()
 
-    # I. 教育者用コンソール
     elif current_page in ['mentor', 'mentor_dashboard']:
         if is_mentor_staff:
             show_mentor_page()
         else:
             st.error("アクセス権限がありません。")
 
-    # J. 拡張ツール
     elif current_page == 'simulation':
         show_simulation_page()
 
-    # K. 不明なページ
     else:
         st.warning(f"不明なページです: {current_page}")
         if st.button("ホームへ戻る"):
