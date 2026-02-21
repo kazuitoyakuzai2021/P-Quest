@@ -1,2 +1,3 @@
-﻿ID,日時,ユーザー,タイトル,内容,回答,ステータス,公開フラグ
-20260221134548,2026/02/21 13:45,新人薬剤師,iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii,iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii,,質問,公開
+﻿ID,日時,ユーザー,タイトル,内容,回答,ステータス,公開フラグ,ユーザーID
+20260221134548,2026/02/21 13:45,新人薬剤師,iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii,iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii,,質問,公開,guest
+20260221143919,2026/02/21 14:39,新人薬剤師,テスト：質問1公開,テスト：質問1公開,,質問,公開,222222
