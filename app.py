@@ -16,10 +16,16 @@ import plotly.express as px
 from collections import Counter
 
 # --- 1. 設定・パス関連 ---
-LOGIN_FILE = "login_data.csv"
+LOGIN_FILE = "assets/spread_data/login_data.csv"
 USERS_BASE_DIR = "assets/users"
 SYSTEM_REQUEST_FILE = "assets/spread_data/system_requests.csv"
-
+ASSETS_DIR = "assets"
+IN_DATA_DIR = "assets/spread_data"
+OUT_DATA_DIR = "assets/drive_data"
+SPREAD_DIR = os.path.join(ASSETS_DIR, "spread_data")
+USERS_DIR = os.path.join(ASSETS_DIR, "users")
+TASK_CSV = os.path.join(SPREAD_DIR, "task_list.csv")
+LOGIN_CSV = os.path.join(SPREAD_DIR, "login_data.csv")
 # フォルダが存在しない場合は作成
 os.makedirs(USERS_BASE_DIR, exist_ok=True)
 if not os.path.exists(LOGIN_FILE):
@@ -27,9 +33,8 @@ if not os.path.exists(LOGIN_FILE):
         writer = csv.writer(f)
         writer.writerow(["id", "name", "password", "role", "level", "exp", "points"])
 
-
 # ==========================================
-# 1. 低層エンジン（通信・ハッシュ）
+#　githubと同期
 # ==========================================
 def github_sync_engine(local_path, mode="upload"):
     """GitHubリポジトリにないファイルを反映させるための最終回答"""
@@ -100,9 +105,7 @@ def github_sync_engine(local_path, mode="upload"):
     except Exception as e:
         print(f"エンジン例外エラー: {e}")
         return False
-# ==========================================
 # 共通UIヘルパー（中央プログレス表示）
-# ==========================================
 def render_sync_ui(title_text):
     st.markdown("""
         <style>
@@ -126,9 +129,7 @@ def render_sync_ui(title_text):
     p_bar = st.progress(0)
     p_text = st.empty()
     return p_bar, p_text
-# ==========================================
-# 2. ロード処理
-# ==========================================
+# ロード処理
 def sync_all_assets_recursive(u_id, mode="download"):
     try:
         token = st.secrets["GITHUB_TOKEN"]
@@ -164,17 +165,30 @@ def sync_all_assets_recursive(u_id, mode="download"):
             placeholder.empty()
     except Exception as e:
         print(f"Recursive Load Error: {e}")
-# ==========================================
-# 3. セーブ処理
-# ==========================================
-def sync_user_assets(u_id, mode="upload"):
+# セーブ処理
+def sync_user_assets(u_id, mode="upload", scope="user"):
+    """
+    GitHub同期：指定された範囲(scope)のみをスキャンして同期する
+    scope="user"  : 自分の日誌や成績のみ (高速)
+    scope="drive" : 資料ライブラリのみ
+    scope="all"   : 全体 (従来通り)
+    """
     if not u_id or u_id == 'guest': return
 
     token = st.secrets["GITHUB_TOKEN"]
     repo = st.secrets["GITHUB_REPO"]
     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
 
-    target_folders = [f"assets/users/{u_id}", "assets/drive_data"]
+    # --- 修正ポイント：scopeによってスキャンするフォルダを限定する ---
+    if scope == "user":
+        target_folders = [f"assets/users/{u_id}"]
+    elif scope == "drive":
+        target_folders = ["assets/drive_data"]
+    elif scope == "all":
+        target_folders = [f"assets/users/{u_id}", "assets/drive_data"]
+    else:
+        target_folders = [f"assets/users/{u_id}"]  # デフォルトはユーザーのみ
+
     files_to_save = []
     for folder in target_folders:
         if os.path.exists(folder):
@@ -185,7 +199,9 @@ def sync_user_assets(u_id, mode="upload"):
     if files_to_save:
         placeholder = st.empty()
         with placeholder.container():
-            p_bar, p_text = render_sync_ui("💾 データを保存中")
+            # scopeによって表示文言を変えると分かりやすい
+            title_msg = "💾 パーソナルデータを保存中" if scope == "user" else "💾 共有ドライブを保存中"
+            p_bar, p_text = render_sync_ui(title_msg)
             total = len(files_to_save)
 
             for i, f_path in enumerate(files_to_save):
@@ -199,9 +215,11 @@ def sync_user_assets(u_id, mode="upload"):
                     print(f"💡 GitHub未存在のため新規追加判定: {github_path}")
                     should_upload = True
                 elif res.status_code == 200:
-                    remote_content = res.json().get("content", "").replace("\n", "")
+                    # 改行コードの揺れを排除するためにstrip()を追加
+                    remote_content = res.json().get("content", "").replace("\n", "").strip()
                     with open(f_path, "rb") as f:
-                        local_content = base64.b64encode(f.read()).decode("ascii")
+                        local_content = base64.b64encode(f.read()).decode("ascii").strip()
+
                     if remote_content != local_content:
                         print(f"💡 差分検知のため更新判定: {github_path}")
                         should_upload = True
@@ -216,8 +234,10 @@ def sync_user_assets(u_id, mode="upload"):
                 p_bar.progress(percent)
                 p_text.markdown(f"**{i + 1} / {total}** ({percent}%)")
         placeholder.empty()
-
-st.set_page_config(page_title="P-Quest 浜松医療センター薬剤科", page_icon="💊", layout="centered")
+# ==========================================
+#　ログイン画面
+# ==========================================
+st.set_page_config(page_title="P-Quest 浜松医療センター薬剤科", page_icon="💊", layout="wide")
 def get_image_base64(path):
     if os.path.exists(path):
         with open(path, "rb") as f:
@@ -316,79 +336,57 @@ def show_staff_confirmation_page():
             """, unsafe_allow_html=True)
 
             st.markdown('</div>', unsafe_allow_html=True)  # ここで箱を閉じる
-# --- ゲスト専用メニュー（任意） ---
-def show_guest_menu():
-    """ゲスト用メイン画面（機能を制限したスリム版）"""
-
-    # --- 1. コンパクト・ヘッダー (ゲスト版) ---
-    st.markdown("<div class='header-box'>", unsafe_allow_html=True)
-
-    # カラム比率を調整
-    h_col1, h_col2, h_col4 = st.columns([1.5, 2.0, 2.5])
-
-    with h_col1:
-        st.markdown(
-            f"<div class='user-info'>👤 ゲスト様 <span class='level-label'>閲覧のみ</span></div>",
-            unsafe_allow_html=True)
-
-    with h_col2:
-        # ゲストは進捗を保存しないので、案内を表示
-        st.info("💡 職員登録すると学習履歴が保存されます")
-
-    with h_col4:
-        st.markdown('<div class="compact-btn-container">', unsafe_allow_html=True)
-        # ゲスト用のボタン：検索と終了のみ
-        inner_cols = st.columns(2)
-
-        with inner_cols[1]:
-            if st.button("🚪 終了", key="g_logout", type="primary", use_container_width=True):
-                st.session_state.clear()
-                st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    # --- 2. メインメニュー（ゲストが閲覧可能なものに限定） ---
-    st.markdown("<h3 style='text-align: center; margin-bottom: 25px; color: #475569;'>GUEST MENU</h3>",
-                unsafe_allow_html=True)
-
-    # ゲストに見せても良い項目だけを抽出
-    m_col1, m_col2 = st.columns(2)
-    guest_items = [
-        {"title": "📝 問題演習 (体験)", "id": "quiz", "col": m_col2},
-    ]
-
-    for item in guest_items:
-        with item['col']:
-            if st.button(item['title'], key=f"guest_{item['id']}", use_container_width=True):
-                # クイズなどの場合は「保存されません」と警告を出してもいいかも
-                if item['id'] == 'quiz':
-                    st.warning("ゲストモードでは回答結果は保存されません。")
-                st.session_state['page'] = item['id']
-                st.rerun()
 def check_login(user_id, password):
-    """CSVからログイン情報を確認"""
-    if user_id == "000000" and password == "9999":  # 管理者
+    """CSVからログイン情報を確認（最新名簿を同期してから照合）"""
+    # 管理者は同期なしで即時判定（緊急用）
+    if user_id == "000000" and password == "9999":
         return {"id": "admin", "name": "管理者", "role": "管理者", "level": 99, "exp": 0, "points": 0}
+
+    # --- ログイン前に最新の名簿(spread_data)をGitHubから取得 ---
+    try:
+        # assets/spread_data/login_users.csv を狙い撃ちでDL
+        # (github_sync_engineはパスを小文字化して処理するのでそのまま渡してOK)
+        github_sync_engine(LOGIN_FILE, mode="download")
+    except Exception as e:
+        print(f"ログイン時の名簿更新に失敗（オフラインの可能性があります）: {e}")
+
+    # CSVの読み込みと照合
+    if not os.path.exists(LOGIN_FILE):
+        return None
 
     with open(LOGIN_FILE, mode="r", encoding="utf_8_sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            if row['id'] == user_id and row['password'] == password:
+            if str(row['id']) == str(user_id) and str(row['password']) == str(password):
                 return row
     return None
 def register_user(user_id, user_name, user_pw):
-    """新規ユーザー登録"""
+    """新規ユーザー登録（登録後に名簿をGitHubへ即時反映）"""
+    # 既存チェック
     df = pd.read_csv(LOGIN_FILE)
-    if user_id in df['id'].astype(str).values:
+    if str(user_id) in df['id'].astype(str).values:
         return False, "この番号は既に登録されています。"
 
-    new_data = [user_id, user_name, user_pw, "薬剤師"]
+    # ローカルのCSVに追記
+    new_data = [user_id, user_name, user_pw, "一般"] # デフォルト役職は「一般」
     with open(LOGIN_FILE, mode="a", encoding="utf_8_sig", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(new_data)
 
-    os.makedirs(os.path.join(USERS_BASE_DIR, user_id), exist_ok=True)
+    # ユーザー専用フォルダを作成
+    user_dir = os.path.join(USERS_BASE_DIR, str(user_id))
+    os.makedirs(user_dir, exist_ok=True)
+
+    # --- GitHubへ最新名簿をアップロード ---
+    try:
+        # 名簿ファイルをピンポイントで同期
+        success = github_sync_engine(LOGIN_FILE, mode="upload")
+        if not success:
+            print("警告: 名簿のGitHub同期に失敗しました（ローカルには保存済み）")
+    except Exception as e:
+        print(f"同期エラー: {e}")
+
     return True, "登録が完了しました！"
-# --- 4. 画面表示関数 ---
 def show_signup_page():
     """新規登録画面"""
     _, col, _ = st.columns([1, 1.2, 1])
@@ -414,33 +412,6 @@ def show_signup_page():
         if st.button("ログイン画面へ戻る"):
             st.session_state['is_staff_confirmed'] = False
             st.rerun()
-def initialize_user_environment(user_id):
-    """新規ユーザー用のディレクトリと指定された5つの空CSVファイルを一括作成する"""
-
-    # ユーザー専用ディレクトリのパス
-    user_base_dir = os.path.join("assets", "users", str(user_id))
-
-    # 1. フォルダ作成
-    if not os.path.exists(user_base_dir):
-        os.makedirs(user_base_dir, exist_ok=True)
-        st.toast(f"ユーザーフォルダを作成しました: {user_id}")
-
-    # 2. 作成すべき空ファイルの定義（ご指定の5ファイル）
-    files_to_create = {
-        "diary.csv": ["日付", "内容", "コメント"],
-        "my_progress.csv": ["カテゴリ", "項目", "習得度"],
-        "my_forum.csv": ["ID", "日時", "ユーザー", "タイトル", "内容", "回答", "ステータス", "公開フラグ"],
-        # クイズ等の全履歴（日報的なサマリー用）
-        "my_all_results.csv": ["日時", "タイプ", "タイトル", "スコア", "正解数", "総数"],
-        # 特定のテスト成績（内規テストなど、重要な試験の記録用）
-        "my_test_results.csv": ["実施日", "テスト名", "得点", "満点", "判定", "経過時間"]
-    }
-
-    # 3. 各ファイルの存在確認と初期化
-    for filename, columns in files_to_create.items():
-        file_path = os.path.join(user_base_dir, filename)
-        if not os.path.exists(file_path):
-            pd.DataFrame(columns=columns).to_csv(file_path, index=False, encoding="utf_8_sig")
 def calculate_user_stats(u_id):
     """my_all_results.csv を読み込み、難易度別に経験値、レベル、ポイントを算出する"""
     results_path = f"assets/users/{u_id}/my_all_results.csv"
@@ -493,6 +464,59 @@ def calculate_user_stats(u_id):
     current_exp = total_exp % 1000
 
     return level, current_exp, total_points
+# ==========================================
+#　ゲスト画面
+# ==========================================
+def show_guest_menu():
+    """ゲスト用メイン画面（機能を制限したスリム版）"""
+
+    # --- 1. コンパクト・ヘッダー (ゲスト版) ---
+    st.markdown("<div class='header-box'>", unsafe_allow_html=True)
+
+    # カラム比率を調整
+    h_col1, h_col2, h_col4 = st.columns([1.5, 2.0, 2.5])
+
+    with h_col1:
+        st.markdown(
+            f"<div class='user-info'>👤 ゲスト様 <span class='level-label'>閲覧のみ</span></div>",
+            unsafe_allow_html=True)
+
+    with h_col2:
+        # ゲストは進捗を保存しないので、案内を表示
+        st.info("💡 職員登録すると学習履歴が保存されます")
+
+    with h_col4:
+        st.markdown('<div class="compact-btn-container">', unsafe_allow_html=True)
+        # ゲスト用のボタン：検索と終了のみ
+        inner_cols = st.columns(2)
+
+        with inner_cols[1]:
+            if st.button("🚪 終了", key="g_logout", type="primary", use_container_width=True):
+                st.session_state.clear()
+                st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # --- 2. メインメニュー（ゲストが閲覧可能なものに限定） ---
+    st.markdown("<h3 style='text-align: center; margin-bottom: 25px; color: #475569;'>GUEST MENU</h3>",
+                unsafe_allow_html=True)
+
+    # ゲストに見せても良い項目だけを抽出
+    m_col1, m_col2 = st.columns(2)
+    guest_items = [
+        {"title": "📝 問題演習 (体験)", "id": "quiz", "col": m_col2},
+    ]
+
+    for item in guest_items:
+        with item['col']:
+            if st.button(item['title'], key=f"guest_{item['id']}", use_container_width=True):
+                # クイズなどの場合は「保存されません」と警告を出してもいいかも
+                if item['id'] == 'quiz':
+                    st.warning("ゲストモードでは回答結果は保存されません。")
+                st.session_state['page'] = item['id']
+                st.rerun()
+# ==========================================
+#　メインメニュー
+# ==========================================
 def show_main_menu():
     """メイン画面（難易度別の動的ステータス反映版）"""
     user = st.session_state['user']
@@ -547,14 +571,9 @@ def show_main_menu():
         col_idx += 1
 
         with inner_cols[col_idx]:
+            # --- 修正箇所：終了ボタンの同期処理を削除 ---
             if st.button("🚪 終了", key="h_logout", type="secondary", use_container_width=True):
-                u_id = st.session_state['user'].get('id')
-                if u_id and u_id != 'guest':
-                    # セッションをクリアする前にGitHubへ保存
-                    with st.spinner("保存中..."):
-                        sync_user_assets(u_id, mode="upload")
-
-                # 保存が終わってからクリアとリラン
+                # 各アクション時に即時同期済みのため、ここでは保存をスキップ
                 st.session_state.clear()
                 st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
@@ -564,180 +583,25 @@ def show_main_menu():
                 unsafe_allow_html=True)
 
     m_col1, m_col2, m_col3 = st.columns(3)
+
+    # 資料系が show_study_page に統合されたため、ボタン配置を最適化
     menu_items = [
-        {"title": "📚 参考資料", "id": "study", "col": m_col1},
+        {"title": "📚 資料ライブラリ", "id": "study", "col": m_col1},
         {"title": "📝 問題演習", "id": "quiz", "col": m_col2},
         {"title": "❓ 掲示板", "id": "board", "col": m_col3},
-        {"title": "📖 勉強会資料", "id": "meeting", "col": m_col1},
-        {"title": "💻 シミュレーション", "id": "simulation", "col": m_col2},
-        {"title": "📔 業務日誌", "id": "diary", "col": m_col3},
+        {"title": "💻 シミュレーション", "id": "simulation", "col": m_col1},
+        {"title": "📔 業務日誌", "id": "diary", "col": m_col2},
+        # 今後追加したいメニューがあればここに m_col3 用を追加可能
     ]
 
     for item in menu_items:
         with item['col']:
-            if st.button(item['title'], key=item['id'], use_container_width=True):
+            if st.button(item['title'], key=f"menu_{item['id']}", use_container_width=True):
                 st.session_state['page'] = item['id']
                 st.rerun()
-def show_study_page():
-    """参考資料ライブラリ画面（管理者・本人限定編集版）"""
-    st.markdown("## 📚 参考資料ライブラリ")
-
-    # --- パス設定 ---
-    BASE_DIR = "assets"
-    STORAGE_DIR = os.path.join(BASE_DIR, "drive_data", "参考資料")
-    CSV_FILE = os.path.join(BASE_DIR, "spread_data", "materials.csv")
-    os.makedirs(STORAGE_DIR, exist_ok=True)
-
-    # データ読み込み
-    if os.path.exists(CSV_FILE):
-        df = pd.read_csv(CSV_FILE, encoding="utf_8_sig").fillna("")
-        if "URL" not in df.columns: df["URL"] = ""
-    else:
-        df = pd.DataFrame(columns=["大カテゴリー", "小カテゴリー", "タイトル", "内容", "ファイルパス", "URL", "作問者"])
-
-    if 'adding_new' not in st.session_state: st.session_state.adding_new = False
-
-    # 現在のログインユーザー情報
-    current_user_name = st.session_state['user']['name']
-    is_admin = st.session_state['user'].get('role') == "教育係"
-
-    # --- サイドバー：フィルター ---
-    with st.sidebar:
-        st.markdown("### 🔍 フィルター")
-        sub_categories = {"内規": ["調剤室業務", "注射室業務"], "薬剤": ["精神神経・筋疾患", "骨・関節疾患", "免疫疾患", "心臓・血管系疾患", "腎・泌尿器疾患",
-                  "産科婦人科疾患", "呼吸器疾患", "消化器疾患", "血液及び造血器疾患",
-                  "感覚器疾患", "内分泌・代謝疾患", "皮膚疾患", "感染症", "悪性腫瘍", "その他"],
-                          "チーム": ["感染", "栄養", "緩和"], "その他": ["その他"]}
-        p_filter = st.selectbox("大カテゴリー", ["すべて"] + list(sub_categories.keys()))
-        c_filter = st.selectbox("小カテゴリー", ["すべて"] + (sub_categories[p_filter] if p_filter != "すべて" else []))
-
-        st.divider()
-        # 新規追加ボタンは誰でも押せるが、保存時に本人が「作問者」として記録される
-        if st.button("➕ 新規資料を追加", use_container_width=True):
-            st.session_state.adding_new = True
-            st.rerun()
-
-    # フィルタリング
-    f_df = df.copy()
-    if p_filter != "すべて": f_df = f_df[f_df["大カテゴリー"] == p_filter]
-    if c_filter != "すべて": f_df = f_df[f_df["小カテゴリー"] == c_filter]
-
-    col_list, col_detail = st.columns([1, 2])
-
-    with col_list:
-        st.write(f"資料一覧 ({len(f_df)}件)")
-        if st.session_state.adding_new:
-            st.warning("✨ 新規資料を作成中...")
-            selected_title = None
-        else:
-            selected_title = st.radio("資料を選択", f_df["タイトル"].tolist(),
-                                      label_visibility="collapsed") if not f_df.empty else None
-
-    with col_detail:
-        # --- 1. 新規登録画面 ---
-        if st.session_state.adding_new:
-            st.markdown("### 🆕 新規資料の登録")
-            with st.container(border=True):
-                new_title = st.text_input("タイトル", value="", placeholder="資料のタイトル")
-                new_content = st.text_area("内容・解説", value="", height=150)
-                new_url = st.text_input("🌐 参考URL (あれば)", value="")
-                uploaded_file = st.file_uploader("PDFファイルを選択", type=["pdf"])
-
-                st.divider()
-                c1, c2 = st.columns(2)
-                if c1.button("💾 資料を保存して登録", type="primary", use_container_width=True):
-                    if not new_title:
-                        st.error("タイトルは必須です。")
-                    else:
-                        rel_path = ""
-                        if uploaded_file:
-                            save_path = os.path.join(STORAGE_DIR, uploaded_file.name)
-                            with open(save_path, "wb") as f:
-                                f.write(uploaded_file.getbuffer())
-                            rel_path = f"参考資料/{uploaded_file.name}"
-
-                        new_data = {
-                            "大カテゴリー": "その他", "小カテゴリー": "その他", "タイトル": new_title,
-                            "内容": new_content, "ファイルパス": rel_path, "URL": new_url,
-                            "作問者": current_user_name  # 自動的に本人を記録
-                        }
-                        df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
-                        df.to_csv(CSV_FILE, index=False, encoding="utf_8_sig")
-                        st.session_state.adding_new = False
-                        st.success("登録完了しました！")
-                        st.rerun()
-
-                if c2.button("✖ キャンセル", use_container_width=True):
-                    st.session_state.adding_new = False
-                    st.rerun()
-
-        # --- 2. 既存資料の表示/編集 ---
-        elif selected_title:
-            idx = df[df["タイトル"] == selected_title].index[0]
-            data = df.loc[idx]
-
-            # 【重要】修正権限の判定
-            # 管理者(教育係) であるか、もしくは 作問者(本人) であるか
-            can_modify = is_admin or (str(data["作問者"]) == current_user_name)
-
-            # 権限がある場合のみ編集モードトグルを表示
-            edit_mode = False
-            if can_modify:
-                edit_mode = st.toggle("📝 編集モードを有効にする", value=False)
-            else:
-                st.info("💡 あなたはこの資料の閲覧権限を持っています。")
-
-            with st.container(border=True):
-                if edit_mode:
-                    # --- 修正画面 ---
-                    e_title = st.text_input("タイトル", value=data["タイトル"])
-                    e_content = st.text_area("内容", value=data["内容"], height=200)
-                    e_url = st.text_input("URL", value=data["URL"])
-                    e_file = st.file_uploader("PDFファイルを差し替え", type=["pdf"])
-
-                    st.divider()
-                    b_col1, b_col2 = st.columns(2)
-                    if b_col1.button("💾 変更を確定", type="primary", use_container_width=True):
-                        if e_file:
-                            save_path = os.path.join(STORAGE_DIR, e_file.name)
-                            with open(save_path, "wb") as f:
-                                f.write(e_file.getbuffer())
-                            df.at[idx, "ファイルパス"] = f"参考資料/{e_file.name}"
-
-                        df.at[idx, "タイトル"] = e_title
-                        df.at[idx, "内容"] = e_content
-                        df.at[idx, "URL"] = e_url
-                        df.to_csv(CSV_FILE, index=False, encoding="utf_8_sig")
-                        st.success("更新しました")
-                        st.rerun()
-
-                    if b_col2.button("🗑 資料を削除", use_container_width=True):
-                        if st.warning("本当に削除しますか？"):
-                            df = df.drop(idx)
-                            df.to_csv(CSV_FILE, index=False, encoding="utf_8_sig")
-                            st.rerun()
-                else:
-                    # --- 閲覧画面 ---
-                    st.markdown(f"### {data['タイトル']}")
-                    st.markdown(f"**【大カテゴリー】** {data['大カテゴリー']} / **【小カテゴリー】** {data['小カテゴリー']}")
-                    st.write(data["内容"])
-
-                    st.divider()
-                    # URLがある場合
-                    if data["URL"]:
-                        st.link_button("🌐 参考サイトへ移動", data["URL"], use_container_width=True)
-
-                    # PDFがある場合
-                    if data["ファイルパス"]:
-                        pdf_file = os.path.join(BASE_DIR, "drive_data", data["ファイルパス"])
-                        if os.path.exists(pdf_file):
-                            with open(pdf_file, "rb") as f:
-                                st.download_button("📄 PDF資料を表示/保存", f, file_name=os.path.basename(pdf_file),
-                                                   use_container_width=True)
-                        else:
-                            st.error("ファイルが見つかりません。パスを確認してください。")
-
-                st.caption(f"登録者: {data['作問者']}")
+# ==========================================
+#　クイズ関連
+# ==========================================
 def show_quiz_page():
     # ゲストフラグを取得（mainで初期化されている前提）
     is_guest = st.session_state.get('is_guest', False)
@@ -859,7 +723,6 @@ def run_quiz(category, mode="normal"):
     st.session_state.show_self_check = False
     st.session_state.test_recorded = False
     st.rerun()
-
 @st.dialog("🚀 テスト設定")
 def show_test_settings_dialog(category_name):
     st.write(f"**カテゴリー:** {category_name}")
@@ -890,120 +753,116 @@ def open_test_settings(name):
     """ボタンが押された時にダイアログを開く"""
     show_test_settings_dialog(name)
 def save_test_result(category, total, correct, rate, pass_line):
-    """テストの最終結果（合否を含む）をユーザーフォルダに保存"""
+    """テストの最終結果を保存し、GitHubに同期する"""
     u_id = st.session_state['user'].get('id', 'guest')
     path = f"assets/users/{u_id}/my_test_results.csv"
+
+    # フォルダ作成
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
     is_passed = "合格" if rate >= pass_line else "不合格"
     file_exists = os.path.exists(path)
 
-    with open(path, "a", encoding="utf_8_sig", newline="") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(["日時", "カテゴリー", "正解数", "全問題数", "正答率", "合格ライン", "判定"])
+    # 1. ローカルCSVへ書き込み
+    try:
+        with open(path, "a", encoding="utf_8_sig", newline="") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["日時", "カテゴリー", "正解数", "全問題数", "正答率", "合格ライン", "判定"])
 
-        writer.writerow([
-            datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-            category,
-            correct,
-            total,
-            f"{rate}%",
-            f"{pass_line}%",
-            is_passed
-        ])
+            # datetime.datetime.now() のエラーを防ぐため安全に呼び出し
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+            writer.writerow([
+                now_str,
+                category,
+                correct,
+                total,
+                f"{rate}%",
+                f"{pass_line}%",
+                is_passed
+            ])
+
+        # 2. GitHubへ同期（アップロード）
+        with st.spinner("テスト結果をクラウドに同期中..."):
+            success = github_sync_engine(path, mode="upload")
+
+        if success:
+            st.toast(f"✅ クラウド同期完了: {is_passed}")
+        else:
+            st.warning("⚠️ ローカルに保存しましたが、クラウド同期に失敗しました。")
+
+    except Exception as e:
+        st.error(f"保存エラー: {e}")
+
     print(f"✅ テスト結果を保存しました: {is_passed} ({rate}%)")
 def show_progress_page():
-    """📊 習得度チェックリスト画面（1=0%, 5=100% 計算版）"""
+    """📊 習得度チェックリスト画面（2026年最新仕様版）"""
     name = st.session_state.get('current_task_view', '不明')
     st.markdown(f"### 📊 {name} の習得度")
 
-    # 1. 共通マスター読み込み
+    # 1. 共通マスター・パス設定（省略）
     TASK_CSV = "assets/spread_data/task_list.csv"
-    if not os.path.exists(TASK_CSV):
-        st.error("評価項目リストが見つかりません。")
-        return
-
-    tasks_df = pd.read_csv(TASK_CSV, encoding="utf_8_sig")
-    relevant_tasks = tasks_df[tasks_df["カテゴリ"] == name]["項目"].tolist()
-
-    if not relevant_tasks:
-        st.warning("このカテゴリーには評価項目が登録されていません。")
-        if st.button("戻る"):
-            st.session_state['page'] = 'quiz'
-            st.rerun()
-        return
-
-    # 2. ユーザー別フォルダ設定
     u_id = st.session_state['user'].get('id', 'guest')
-    user_dir = f"assets/users/{u_id}"
-    os.makedirs(user_dir, exist_ok=True)
-    PROG_PATH = os.path.join(user_dir, "my_progress.csv")
+    PROG_PATH = f"assets/users/{u_id}/my_progress.csv"
+    HEADER = ["カテゴリ", "項目", "習得度", "最終更新"]
 
-    # 3. 既存データの読み込み
+    # --- 同期・読み込み処理（中身は前回の修正を維持） ---
+    if f"prog_synced_{name}" not in st.session_state:
+        github_sync_engine(PROG_PATH, mode="download")
+        st.session_state[f"prog_synced_{name}"] = True
+
     current_progress = {}
     if os.path.exists(PROG_PATH):
-        with open(PROG_PATH, "r", encoding="utf_8_sig") as f:
-            for r in csv.reader(f):
-                if len(r) >= 3 and r[0] == name:
-                    current_progress[r[1]] = int(r[2])
+        try:
+            df_existing = pd.read_csv(PROG_PATH, encoding="utf_8_sig")
+            target_rows = df_existing[df_existing["カテゴリ"] == name]
+            current_progress = dict(zip(target_rows["項目"], target_rows["習得度"]))
+        except:
+            pass
 
-    # 4. スライダー表示
+    # 4. 評価項目
+    df_tasks = pd.read_csv(TASK_CSV, encoding="utf_8_sig")
+    relevant_tasks = df_tasks[df_tasks["カテゴリ"] == name]["項目"].tolist()
+
     scores = []
-    st.markdown("---")
     for task in relevant_tasks:
         col1, col2 = st.columns([3, 2])
         col1.write(f"**{task}**")
-        val = col2.select_slider(
-            "自信度",
-            options=[1, 2, 3, 4, 5],
-            value=current_progress.get(task, 1),
-            key=f"task_val_{task}",
-            label_visibility="collapsed"
-        )
+        val = col2.select_slider("自信度", options=[1, 2, 3, 4, 5], value=current_progress.get(task, 1), key=f"t_{task}",
+                                 label_visibility="collapsed")
         scores.append(val)
 
-    # 5. 【計算修正】1=0%, 5=100% ロジック
-    total_items = len(scores)
-    current_sum = sum(scores)
-    max_gain = total_items * 4  # (5-1) * 項目数
-
-    if max_gain > 0:
-        # 分子から項目数分を引くことで、全項目1のときに0%になる
-        perc = int(((current_sum - total_items) / max_gain) * 100)
-    else:
-        perc = 0
-
-    # 0未満にならないようガード
-    perc = max(0, perc)
-
+    # 5. 進捗計算と表示
+    perc = int(((sum(scores) - len(scores)) / (len(scores) * 4)) * 100) if scores else 0
     st.divider()
     st.write(f"現在の習得状況: **{perc}%**")
     st.progress(perc / 100)
 
-    # 6. 保存
-    if st.button("💾 進捗を保存して報酬を獲得", type="primary", use_container_width=True):
-        save_data = []
-        if os.path.exists(PROG_PATH):
-            with open(PROG_PATH, "r", encoding="utf_8_sig") as f:
-                # 他のカテゴリーのデータを退避
-                save_data = [r for r in csv.reader(f) if len(r) >= 3 and r[0] != name]
+    # 6. 【修正箇所】ボタンの width='stretch' 化
+    col_btn, _ = st.columns([1, 1])
+    with col_btn:
+        if st.button("💾 進捗を保存して同期", type="primary", width='stretch'):
+            # --- 保存ロジック ---
+            new_rows = []
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d")
+            if os.path.exists(PROG_PATH):
+                try:
+                    df_old = pd.read_csv(PROG_PATH, encoding="utf_8_sig")
+                    new_rows = df_old[df_old["カテゴリ"] != name].values.tolist()
+                except:
+                    pass
 
-        # 新しいデータを追加
-        now_str = datetime.datetime.now().strftime("%Y-%m-%d")
-        for task, score in zip(relevant_tasks, scores):
-            save_data.append([name, task, score, now_str])
+            for task, score in zip(relevant_tasks, scores):
+                new_rows.append([name, task, score, now_str])
 
-        with open(PROG_PATH, "w", encoding="utf_8_sig", newline="") as f:
-            csv.writer(f).writerows(save_data)
+            df_save = pd.DataFrame(new_rows, columns=HEADER)
+            df_save.to_csv(PROG_PATH, index=False, encoding="utf_8_sig")
+            github_sync_engine(PROG_PATH, mode="upload")
+            st.session_state['page'] = 'quiz'
+            st.rerun()
 
-        st.success(f"保存完了！習得率 {perc}% に到達しました。")
-
-        # 経験値などのゲーム要素
-        if 'gain_exp' in st.session_state:
-            # 習得率に応じたボーナスなどを設定可能
-            st.session_state.gain_exp(perc // 2)
-
+    if st.button("← 戻る (保存しない)", width='stretch'):
         st.session_state['page'] = 'quiz'
         st.rerun()
 def show_quiz_engine():
@@ -1048,7 +907,6 @@ def show_quiz_engine():
     st.write("")
     # 回答用UIの呼び出し
     display_answer_ui(q)
-
 def get_question_priorities(u_id):
     """
     ユーザーの履歴を読み込み、問題ごとの最新の結果をスコアリングする。
@@ -1154,8 +1012,6 @@ def setup_quiz_data():
 
     print(f"✅ セットアップ完了: {len(selected_questions)}問を抽出")
     st.rerun()
-
-
 def process_answer(user_ans, correct_data, q, is_written=False, written_text=None, display_ans_text=None):
     """
     正誤判定とステート更新、および履歴保存の実行
@@ -1243,7 +1099,6 @@ def display_answer_ui(q):
                     process_answer(True, correct_data, q, is_written=True, written_text=st.session_state.temp_ans)
                 if c2.button("❌ 不正解にする", key=f"btn_ng_{current_idx}"):
                     process_answer(False, correct_data, q, is_written=True, written_text=st.session_state.temp_ans)
-
 def display_feedback(q):
     """解説画面に『関連資料』へのリンクを表示"""
     is_ok = st.session_state.last_result
@@ -1290,7 +1145,6 @@ def check_answer(user_ans, correct_data, explanation, q):
     # 履歴保存（Tkinter版の _save_result 相当）
     save_quiz_history(q, user_ans, ans, is_ok)
     st.rerun()
-# --- フィードバック画面などの補助関数 ---
 def show_result_screen():
     total = len(st.session_state.questions)
     correct = st.session_state.correct_count
@@ -1300,12 +1154,23 @@ def show_result_screen():
 
     st.markdown(f"## 🏁 {mode.upper()} 終了")
 
-    # --- 保存処理 (テストモードの場合のみ実行) ---
-    # st.session_state に保存済みフラグを持たせて重複保存を防止
-    if mode == "test" and not st.session_state.get('test_recorded', False):
-        pass_line = st.session_state.get('pass_line', 80)
-        save_test_result(target, total, correct, rate, pass_line)
-        st.session_state.test_recorded = True  # 保存済みフラグ
+    # --- 修正：終了時にまとめて同期を実行 ---
+    if not st.session_state.get('test_recorded', False):
+        u_id = st.session_state['user'].get('id', 'guest')
+
+        with st.status("📊 学習データを同期中...") as status:
+            # A. テストモードならテスト結果を保存・同期
+            if mode == "test":
+                pass_line = st.session_state.get('pass_line', 80)
+                save_test_result(target, total, correct, rate, pass_line)
+
+            # B. モードに関わらず、蓄積された全回答履歴(my_all_results.csv)を同期
+            history_path = f"assets/users/{u_id}/my_all_results.csv"
+            if os.path.exists(history_path):
+                github_sync_engine(history_path, mode="upload")
+
+            status.update(label="✅ 全データの同期が完了しました", state="complete")
+            st.session_state.test_recorded = True
 
     # --- UI表示 ---
     col1, col2, col3 = st.columns(3)
@@ -1324,37 +1189,64 @@ def show_result_screen():
         st.session_state.test_recorded = False  # フラグをリセット
         quit_quiz()
 def quit_quiz():
+    """クイズを中断し、データを同期してからメニューに戻る"""
+    u_id = st.session_state['user'].get('id', 'guest')
+
+    # 中断時点までの履歴を同期
+    history_path = f"assets/users/{u_id}/my_all_results.csv"
+    if os.path.exists(history_path):
+        with st.spinner("データを同期して戻ります..."):
+            github_sync_engine(history_path, mode="upload")
+
     st.session_state.quiz_started = False
     st.session_state.page = "quiz"
     st.rerun()
 def save_quiz_history(q, user_ans, correct_ans, is_ok):
-    """ユーザーフォルダにクイズ結果をCSV保存"""
+    """ユーザーフォルダにクイズ結果をCSV保存（ローカルのみに限定して高速化）"""
     try:
         u_id = st.session_state['user'].get('id', 'guest')
         path = f"assets/users/{u_id}/my_all_results.csv"
-        os.makedirs(os.path.dirname(path), exist_ok=True)
 
+        # 1. フォルダとファイルの準備
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         file_exists = os.path.exists(path)
+
+        # 2. ローカルCSVへ書き込み
         with open(path, "a", encoding="utf_8_sig", newline="") as f:
             writer = csv.writer(f)
             if not file_exists:
-                # ユーザーが後で見やすいように列順を整理
                 writer.writerow(["日時", "カテゴリー", "判定", "問題文", "自分の回答", "正解"])
 
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
             writer.writerow([
-                datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                now_str,
                 q[1],  # カテゴリー
                 "正解" if is_ok else "不正解",
                 q[4],  # 問題文
                 user_ans,
                 correct_ans
             ])
-        print(f"✅ CSV保存完了: {path}")  # ターミナルで確認用
-    except Exception as e:
-        print(f"❌ CSV保存失敗: {e}")
 
+        # 【修正】1問ごとの github_sync_engine 呼び出しを削除しました
+        print(f"✅ ローカル保存完了: {path}")
+
+    except Exception as e:
+        print(f"❌ 履歴の保存に失敗しました: {e}")
+def sync_quiz_results_to_github():
+    """クイズの履歴ファイルをGitHubにピンポイント同期する"""
+    u_id = st.session_state['user'].get('id', 'guest')
+    if u_id == 'guest': return
+
+    path = f"assets/users/{u_id}/my_all_results.csv"
+    if os.path.exists(path):
+        with st.spinner("📊 学習データを同期中..."):
+            success = github_sync_engine(path, mode="upload")
+            if success:
+                st.toast("✅ 学習履歴をクラウドに同期しました")
 def show_review_page():
-    """📊 学習履歴・復習・統計画面（状態保持・プレビュー強化版）"""
+    """📊 学習履歴・復習・統計画面（最新日時追加・全幅レイアウト版）"""
+    # 画面を広く使う設定（個別のページ設定が難しい場合はコンテナで制御）
     st.markdown("# 📊 学習履歴と復習")
 
     u_id = st.session_state.get('user', {}).get('id', 'default_user')
@@ -1380,21 +1272,23 @@ def show_review_page():
         try:
             with open(RESULTS_CSV, "r", encoding="utf_8_sig") as f:
                 r = csv.reader(f)
-                next(r, None)  # ヘッダー飛ばし
+                header = next(r, None)  # ヘッダー飛ばし
                 for row in r:
                     if len(row) >= 6:
+                        timestamp = row[0].strip()  # 日時
                         res = row[2].strip()  # 判定
                         q_text = row[3].strip()  # 問題文
                         my_ans = row[4].strip()  # 自分の回答
 
                         if q_text not in stats:
-                            stats[q_text] = {"res": [], "ans": []}
+                            stats[q_text] = {"res": [], "ans": [], "dates": []}
                         stats[q_text]["res"].append(res)
                         stats[q_text]["ans"].append(my_ans)
+                        stats[q_text]["dates"].append(timestamp)
         except Exception as e:
             st.error(f"成績データの読み込みに失敗しました: {e}")
 
-    # --- 3. フィルター用サイドバー（状態保持版） ---
+    # --- 3. フィルター用サイドバー ---
     with st.sidebar:
         st.markdown("### 🔍 フィルター設定")
         sub_categories = {
@@ -1411,7 +1305,6 @@ def show_review_page():
 
         min_options = sub_categories.get(st.session_state.filter_maj,
                                          ["すべて"]) if st.session_state.filter_maj != "すべて" else ["すべて"]
-        # 小カテゴリーの整合性チェック
         if st.session_state.filter_min not in min_options: st.session_state.filter_min = "すべて"
 
         st.session_state.filter_min = st.selectbox("小カテゴリー", min_options,
@@ -1426,7 +1319,7 @@ def show_review_page():
         st.session_state.filter_l_res = st.selectbox("最新成績で絞り込み", results_opts,
                                                      index=results_opts.index(st.session_state.filter_l_res))
 
-        if st.button("フィルターをリセット"):
+        if st.button("フィルターをリセット", width='stretch'):
             for key in ['filter_maj', 'filter_min', 'filter_lvl', 'filter_f_res', 'filter_l_res']:
                 st.session_state[key] = "すべて"
             st.rerun()
@@ -1444,14 +1337,16 @@ def show_review_page():
             display_data = []
             for _, row in df_q.iterrows():
                 q_txt = str(row["問題文"]).strip()
-                h = stats.get(q_txt, {"res": [], "ans": []})
+                h = stats.get(q_txt, {"res": [], "ans": [], "dates": []})
                 results = h["res"]
                 answers = h["ans"]
+                dates = h["dates"]
 
                 first_res = results[0] if results else "未回答"
                 latest_res = results[-1] if results else "未回答"
                 first_ans = answers[0] if answers else "-"
                 latest_ans = answers[-1] if answers else "-"
+                latest_date = dates[-1] if dates else "-"
                 total_tries = len(results)
                 accuracy_rate = f"{int((results.count('正解') / total_tries) * 100)}%" if total_tries > 0 else "0%"
 
@@ -1463,6 +1358,7 @@ def show_review_page():
                 if st.session_state.filter_l_res != "すべて" and latest_res != st.session_state.filter_l_res: continue
 
                 display_data.append({
+                    "最新回答日時": latest_date,
                     "大項目": row["大項目"], "小項目": row["小項目"], "レベル": row["レベル"],
                     "問題文": q_txt, "初回成績": first_res, "初回回答": first_ans,
                     "最新成績": latest_res, "最新回答": latest_ans,
@@ -1473,6 +1369,7 @@ def show_review_page():
             if display_data:
                 res_df = pd.DataFrame(display_data)
 
+                # メトリック表示
                 col_m1, col_m2, col_m3 = st.columns(3)
                 overcome_count = len(res_df[(res_df["初回成績"] == "不正解") & (res_df["最新成績"] == "正解")])
                 answered_count = len(res_df[res_df['最新成績'] != '未回答'])
@@ -1482,28 +1379,38 @@ def show_review_page():
                     (answered_count / total_questions_count) * 100) if total_questions_count > 0 else 0
                 col_m3.metric("学習進捗率", f"{progress_percent} %")
 
-                st.subheader("📋 復習対象の選択")
-                view_cols = ["大項目", "小項目", "レベル", "問題文", "初回成績", "初回回答", "最新成績", "最新回答", "回答回数", "正答率"]
-                selected_event = st.dataframe(res_df[view_cols], width='stretch', hide_index=True, on_select="rerun",
-                                              selection_mode="multi-row")
+                st.subheader("📋 問題一覧（最新日時でソート可能）")
+
+                # 表示列の定義（「最新回答日時」を先頭付近に配置）
+                view_cols = ["最新回答日時", "大項目", "小項目", "レベル", "問題文", "初回成績", "最新成績", "回答回数", "正答率"]
+
+                # 画面いっぱいに表示するために width='stretch' を適用
+                selected_event = st.dataframe(
+                    res_df[view_cols],
+                    width='stretch',
+                    height=500,  # 高さを固定して見やすく
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="multi-row"
+                )
                 selected_rows = selected_event.selection.rows
 
+                # 復習ボタンエリア
                 c_btn1, c_btn2 = st.columns(2)
                 with c_btn1:
-                    if st.button(f"🔄 選択した {len(selected_rows)} 問を復習", use_container_width=True, type="primary",
+                    if st.button(f"🔄 選択した {len(selected_rows)} 問を復習", width='stretch', type="primary",
                                  disabled=len(selected_rows) == 0):
-                        # 復習用セッションのセットアップ
                         selected_q_texts = res_df.iloc[selected_rows]["問題文"].tolist()
                         st.session_state.questions = df_q[df_q["問題文"].isin(selected_q_texts)].values.tolist()
                         st.session_state.quiz_started = True
-                        st.session_state.quiz_finished = False  # ここが重要
+                        st.session_state.quiz_finished = False
                         st.session_state.current_index = 0
                         st.session_state.correct_count = 0
-                        st.session_state.page = "quiz"  # ページ遷移を明示
+                        st.session_state.page = "quiz"
                         st.rerun()
 
                 with c_btn2:
-                    if st.button("📖 表示中の全問題を復習", use_container_width=True):
+                    if st.button("📖 表示中の全問題を復習", width='stretch'):
                         st.session_state.questions = df_q[df_q["問題文"].isin(res_df["問題文"])].values.tolist()
                         st.session_state.quiz_started = True
                         st.session_state.quiz_finished = False
@@ -1517,15 +1424,18 @@ def show_review_page():
                     st.divider()
                     q_detail = res_df.iloc[selected_rows[0]]
                     with st.container(border=True):
-                        st.markdown(f"### 🔍 問題プレビュー\n**{q_detail['問題文']}**")
+                        st.markdown(f"### 🔍 詳細プレビュー")
+                        st.markdown(f"**【問題文】**\n{q_detail['問題文']}")
 
-                        p_col1, p_col2 = st.columns(2)
+                        p_col1, p_col2, p_col3 = st.columns(3)
                         with p_col1:
                             st.write(f"🔹 **初回:** {q_detail['初回成績']} ({q_detail['初回回答']})")
                             st.write(f"🔹 **最新:** {q_detail['最新成績']} ({q_detail['最新回答']})")
                         with p_col2:
                             st.write(f"📈 **正答率:** {q_detail['正答率']}")
                             st.write(f"🔢 **回答回数:** {q_detail['回答回数']} 回")
+                        with p_col3:
+                            st.write(f"📅 **最終回答:**\n{q_detail['最新回答日時']}")
 
                         if q_detail['最新成績'] != "未回答":
                             st.success(f"**【模範解答】**\n{q_detail['解答']}")
@@ -1537,308 +1447,249 @@ def show_review_page():
         st.markdown("### 🏆 テスト履歴")
         if os.path.exists(TEST_RESULTS_CSV):
             df_test = pd.read_csv(TEST_RESULTS_CSV, encoding="utf_8_sig")
-            df_test = df_test.sort_values(by="日時", ascending=False)
+            # 「日時」列が存在することを確認してソート
+            if "日時" in df_test.columns:
+                df_test = df_test.sort_values(by="日時", ascending=False)
             st.dataframe(df_test, width='stretch', hide_index=True)
         else:
             st.info("テスト履歴がありません。")
-# --- 1. 補助関数（ファイル管理・データ操作） ---
+# ==========================================
+#　メッセージ関連
+# ==========================================
 def ensure_csv_exists(path, columns):
     """CSVファイルとディレクトリの存在を保証する"""
     if not os.path.exists(path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         pd.DataFrame(columns=columns).to_csv(path, index=False, encoding="utf_8_sig")
-def save_message(title, content, status, is_anon, is_public, u_name, MASTER_CSV, USER_CSV):
-    """メッセージをマスターとユーザー用CSVの両方に保存する"""
+def save_message(title, content, status, is_anon, is_public, u_name, u_id, MASTER_CSV, USER_CSV):
+    """新規投稿をマスターと個人ログの両方に保存する"""
     now = datetime.datetime.now()
     new_data = {
         "ID": now.strftime("%Y%m%d%H%M%S"),
         "日時": now.strftime("%Y/%m/%d %H:%M"),
         "ユーザー": "匿名さん" if is_anon else u_name,
+        "ユーザーID": u_id,
         "タイトル": title,
         "内容": content,
         "回答": "",
         "ステータス": status,
         "公開フラグ": "公開" if is_public else "非公開"
     }
-    cols = ["ID", "日時", "ユーザー", "タイトル", "内容", "回答", "ステータス", "公開フラグ"]
+
+    # マスターと個人用、両方に書き込み
     for path in [MASTER_CSV, USER_CSV]:
-        ensure_csv_exists(path, cols)
+        ensure_csv_exists(path, ["ID", "日時", "ユーザー", "ユーザーID", "タイトル", "内容", "回答", "ステータス", "公開フラグ"])
         df = pd.read_csv(path, encoding="utf_8_sig")
         df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
         df.to_csv(path, index=False, encoding="utf_8_sig")
-def delete_message(msg_id, MASTER_CSV, USER_CSV):
-    """マスターとユーザー用CSVからメッセージを削除する"""
-    for path in [MASTER_CSV, USER_CSV]:
-        if os.path.exists(path):
-            df = pd.read_csv(path, encoding="utf_8_sig")
-            # IDを文字列として比較して削除
-            df = df[df['ID'].astype(str) != str(msg_id)]
-            df.to_csv(path, index=False, encoding="utf_8_sig")
-def submit_answer(m_id, ans_text, MASTER_CSV):
-    """管理者回答を保存する"""
-    df = pd.read_csv(MASTER_CSV, encoding="utf_8_sig")
-    df.loc[df['ID'].astype(str) == str(m_id), '回答'] = ans_text
-    df.loc[df['ID'].astype(str) == str(m_id), 'ステータス'] = "回答済み"
-    df.to_csv(MASTER_CSV, index=False, encoding="utf_8_sig")
-# --- 2. 描画パーツ ---
-def render_post_form(u_name, u_role, MASTER_CSV, USER_CSV):
-    """新規投稿フォーム"""
-    st.subheader("📝 メッセージ作成")
+        # 各ファイルをGitHubへ同期
+        github_sync_engine(path, mode="upload")
+def submit_answer(m_id, ans_text, is_anon, u_name, u_id, MASTER_CSV):  # 回答者ID(u_id)を追加
+    """回答を追記し、投稿者と回答者双方の個人ログにも反映させる"""
+    df_master = pd.read_csv(MASTER_CSV, encoding="utf_8_sig")
+    m_id = str(m_id)
 
-    # 状態管理（問題引用によるタイトル自動入力用）
-    if "temp_title" not in st.session_state:
-        st.session_state.temp_title = ""
+    if m_id not in df_master['ID'].astype(str).values:
+        return False
+
+    idx = df_master[df_master['ID'].astype(str) == m_id].index[0]
+    post_user_id = df_master.at[idx, 'ユーザーID']  # 投稿者のID
+
+    # 回答文のフォーマット
+    display_name = "匿名さん" if is_anon else u_name
+    now_str = datetime.datetime.now().strftime("%m/%d %H:%M")
+    new_entry = f"【{display_name}】({now_str})\n{ans_text}\n"
+
+    current_ans = str(df_master.at[idx, '回答']) if pd.notna(df_master.at[idx, '回答']) else ""
+    updated_ans = current_ans + "\n" + new_entry if current_ans else new_entry
+
+    # A. マスターCSVの更新と同期
+    df_master.at[idx, '回答'] = updated_ans
+    df_master.at[idx, 'ステータス'] = "回答あり"
+    df_master.to_csv(MASTER_CSV, index=False, encoding="utf_8_sig")
+    github_sync_engine(MASTER_CSV, mode="upload")
+
+    # B. 投稿者と回答者、それぞれの個人CSVを更新
+    # 自分の投稿への回答、または自分が他人の投稿に回答した場合の両方に対応
+    target_user_ids = list(set([str(post_user_id), str(u_id)]))  # 重複排除
+
+    for target_id in target_user_ids:
+        user_csv_path = f"assets/users/{target_id}/my_forum.csv"
+        if os.path.exists(user_csv_path):
+            df_user = pd.read_csv(user_csv_path, encoding="utf_8_sig")
+            # その投稿が個人ログに存在すれば更新（回答者のログにはまだ無い場合が多いので適宜処理）
+            if m_id in df_user['ID'].astype(str).values:
+                u_idx = df_user[df_user['ID'].astype(str) == m_id].index[0]
+                df_user.at[u_idx, '回答'] = updated_ans
+                df_user.at[u_idx, 'ステータス'] = "回答あり"
+                df_user.to_csv(user_csv_path, index=False, encoding="utf_8_sig")
+                github_sync_engine(user_csv_path, mode="upload")
+
+    return True
+def render_post_form(u_name, u_id, u_role, MASTER_CSV, USER_CSV):
+    """新規投稿フォーム：異議申し立て引用機能付き"""
+    st.subheader("📝 新しいメッセージを投稿")
 
     type_options = ["質問", "システムの要望", "問題の異議申し立て"]
     if any(r in str(u_role) for r in ["管理者", "メンター", "教育係"]):
         type_options.insert(0, "お知らせ")
 
-    msg_type = st.selectbox("カテゴリー", type_options, key="msg_type_select")
+    msg_type = st.selectbox("カテゴリー", type_options)
 
-    # 異議申し立ての場合の引用ツール（送信ボタンの反応を避けるためFormの外）
+    # 引用ツール
     if msg_type == "問題の異議申し立て":
-        st.info("👇 引用する問題を選択すると、タイトルに問題文が自動入力されます。")
         Q_CSV = "assets/spread_data/questions.csv"
         if os.path.exists(Q_CSV):
             df_q = pd.read_csv(Q_CSV, encoding="utf_8_sig")
             c1, c2 = st.columns(2)
-            maj = c1.selectbox("大項目", ["すべて"] + sorted(df_q["大項目"].unique().tolist()))
+            maj = c1.selectbox("大項目で絞り込み", ["すべて"] + sorted(df_q["大項目"].unique().tolist()))
             tmp = df_q if maj == "すべて" else df_q[df_q["大項目"] == maj]
-            min_cat = c2.selectbox("小項目", ["すべて"] + sorted(tmp["小項目"].unique().tolist()))
+            selected_q = st.selectbox("該当の問題を選択してください", ["-- 未選択 --"] + tmp["問題文"].tolist())
+            if selected_q != "-- 未選択 --":
+                st.session_state.temp_title = f"【異議】{selected_q}"
 
-            final_df = tmp if min_cat == "すべて" else tmp[tmp["小項目"] == min_cat]
-            selected_q = st.selectbox("問題を選択", ["-- 選択 --"] + final_df["問題文"].tolist())
-
-            if selected_q != "-- 選択 --":
-                st.session_state.temp_title = selected_q  # タイトルにセット
-        else:
-            st.error("問題データが見つかりません。")
-
-    with st.form("post_form"):
-        # 引用がある場合はその値を初期値にする
-        title = st.text_input("件名（問題文）", value=st.session_state.temp_title)
-        content = st.text_area("本文", height=200, placeholder="具体的な要望や、異議の内容を詳しく記入してください。")
+    with st.form("post_form_final"):
+        title = st.text_input("件名", value=st.session_state.get("temp_title", ""))
+        content = st.text_area("内容", height=150, placeholder="具体的な内容を記入してください...")
         c1, c2 = st.columns(2)
-        is_anon = c1.checkbox("匿名投稿（管理側には氏名が記録されます）")
-        is_public = c2.checkbox("全体公開", value=True)
+        is_anon = c1.checkbox("匿名で投稿する")
+        is_public = c2.checkbox("全体に公開する", value=True)
 
-        if st.form_submit_button("🚀 メッセージを送信", width='stretch'):
+        if st.form_submit_button("🚀 投稿する", use_container_width=True):
             if title and content:
-                save_message(title, content, msg_type, is_anon, is_public, u_name, MASTER_CSV, USER_CSV)
-                st.session_state.temp_title = ""  # リセット
-                st.success("送信しました！")
+                save_message(title, content, msg_type, is_anon, is_public, u_name, u_id, MASTER_CSV, USER_CSV)
+                st.session_state.temp_title = ""
                 st.session_state.forum_view = "list"
+                st.success("投稿が完了しました！")
                 st.rerun()
             else:
                 st.error("件名と本文を入力してください。")
 
     if st.button("← 戻る"):
-        st.session_state.temp_title = ""
         st.session_state.forum_view = "list"
         st.rerun()
-# --- 3. メイン機能 ---
 def show_message_hub():
-    """掲示板メイン"""
+    """掲示板メイン：閲覧・回答・削除の統合画面（2026年 UI仕様準拠版）"""
+    # ユーザー情報の取得
     u_id = st.session_state.get('user', {}).get('id', 'guest')
     u_name = st.session_state.get('user', {}).get('name', 'Unknown')
-    u_role = st.session_state.get('user', {}).get('role', '一般')
+    u_role = str(st.session_state.get('user', {}).get('role', '一般'))
+    is_admin = any(r in u_role for r in ["管理者", "メンター", "教育係"])
 
+    # 1. パスとカラムの定義
     MASTER_CSV = "assets/spread_data/forum_master.csv"
     USER_CSV = f"assets/users/{u_id}/my_forum.csv"
-    cols = ["ID", "日時", "ユーザー", "タイトル", "内容", "回答", "ステータス", "公開フラグ"]
+    cols = ["ID", "日時", "ユーザー", "ユーザーID", "タイトル", "内容", "回答", "ステータス", "公開フラグ"]
 
-    ensure_csv_exists(MASTER_CSV, cols)
-    ensure_csv_exists(USER_CSV, cols)
+    # 2. フォルダの存在保証
+    os.makedirs(os.path.dirname(MASTER_CSV), exist_ok=True)
+    os.makedirs(os.path.dirname(USER_CSV), exist_ok=True)
 
+    # 3. GitHubから最新データを同期
+    if "forum_synced" not in st.session_state:
+        github_sync_engine(MASTER_CSV, mode="download")
+        st.session_state.forum_synced = True
+
+    # 4. ファイル不在時の生成 & カラム補完
+    for path in [MASTER_CSV, USER_CSV]:
+        if not os.path.exists(path):
+            pd.DataFrame(columns=cols).to_csv(path, index=False, encoding="utf_8_sig")
+        else:
+            df_tmp = pd.read_csv(path, encoding="utf_8_sig")
+            missing_cols = [c for c in cols if c not in df_tmp.columns]
+            if missing_cols:
+                for c in missing_cols:
+                    df_tmp[c] = "guest" if c == "ユーザーID" else ""
+                df_tmp.to_csv(path, index=False, encoding="utf_8_sig")
+
+    # 5. 投稿フォームへの切り替え
     if st.session_state.get("forum_view") == "post":
-        render_post_form(u_name, u_role, MASTER_CSV, USER_CSV)
+        render_post_form(u_name, u_id, u_role, MASTER_CSV, USER_CSV)
         return
 
-    # --- 一覧表示画面 ---
+    # 6. サイドバー
     with st.sidebar:
-        st.markdown("### 📂 カテゴリー")
-        f_cat = st.radio("表示切り替え", ["すべて", "お知らせ", "質問", "システムの要望", "問題の異議申し立て", "解決済み"])
+        st.markdown("### 📂 表示フィルター")
+        f_cat = st.radio("カテゴリー選択", ["すべて", "お知らせ", "質問", "要望", "異議"])
         st.divider()
-        if st.button("➕ 新規メッセージ作成", type="primary", use_container_width=True):
+        # use_container_width -> width='stretch'
+        if st.button("➕ 新規メッセージ作成", type="primary", width='stretch'):
             st.session_state.forum_view = "post"
             st.rerun()
 
+    # 7. データの読み込み
     df = pd.read_csv(MASTER_CSV, encoding="utf_8_sig")
 
-    # フィルタリング
-    if f_cat == "解決済み":
-        df = df[df["ステータス"] == "回答済み"]
-    elif f_cat != "すべて":
-        df = df[df["ステータス"] == f_cat]
+    # 8. 権限フィルタリング
+    if not is_admin:
+        df = df[(df["公開フラグ"] == "公開") | (df["ユーザーID"].astype(str) == str(u_id))]
 
-    # 公開制限
-    is_admin = any(r in str(u_role) for r in ["管理者", "メンター", "教育係"])
-    df = df[(df["公開フラグ"] == "公開") | (df["ユーザー"] == u_name) | (is_admin)]
+    cat_map = {"要望": "システムの要望", "異議": "問題の異議申し立て"}
+    if f_cat != "すべて":
+        target = cat_map.get(f_cat, f_cat)
+        df = df[df["ステータス"] == target]
 
-    col_l, col_r = st.columns([1, 1.2])
+    # 9. 画面レイアウト
+    col_list, col_detail = st.columns([1, 1.2])
 
-    with col_l:
-        selected_event = None
+    with col_list:
+        st.markdown("##### 📨 投稿一覧")
         if df.empty:
             st.info("表示できるメッセージはありません。")
+            selected_rows = None
         else:
-            list_df = df[["日時", "ステータス", "タイトル"]].sort_values("日時", ascending=False)
-            selected_event = st.dataframe(
-                list_df, width='stretch', hide_index=True,
-                on_select="rerun", selection_mode="single-row"
+            view_df = df[["日時", "ユーザー", "タイトル"]].sort_values("日時", ascending=False)
+            selected_rows = st.dataframe(
+                view_df,
+                width='stretch',  # 2026年仕様
+                height=550,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row"
             )
 
-    with col_r:
-        if selected_event is not None and "selection" in selected_event and len(selected_event.selection.rows) > 0:
-            idx = list_df.index[selected_event.selection.rows[0]]
-            msg = df.loc[idx]
+    with col_detail:
+        st.markdown("##### 📖 詳細内容")
+        if selected_rows and len(selected_rows.selection.rows) > 0:
+            row_idx = selected_rows.selection.rows[0]
+            orig_idx = view_df.index[row_idx]
+            msg = df.loc[orig_idx]
 
-            # --- 詳細ヘッダー ---
-            st.markdown(f"#### {msg['タイトル']}")
-            st.caption(f"📅 {msg['日時']} | 👤 {msg['ユーザー']} | 🏷️ {msg['ステータス']}")
+            with st.container(border=True):
+                st.markdown(f"### {msg['タイトル']}")
+                st.caption(f"👤 {msg['ユーザー']} | 📅 {msg['日時']}")
+                st.write(msg['内容'])
 
-            # 自分の投稿、または管理者なら削除ボタンを表示
-            can_delete = (msg['ユーザー'] == u_name) or (msg['ユーザー'] == "匿名さん" and is_admin) or is_admin
-
-            if can_delete:
-                if st.button("🗑️ この投稿を削除する", type="secondary"):
-                    delete_message(msg['ID'], MASTER_CSV, USER_CSV)
-                    st.toast("削除しました")
-                    st.rerun()
-
-            st.markdown("---")
-            st.markdown(msg['内容'])
-
-            # 回答表示
             if pd.notna(msg['回答']) and str(msg['回答']).strip():
-                st.success(f"**【回答】**\n\n{msg['回答']}")
+                st.markdown("---")
+                st.markdown("##### 💬 コメント履歴")
+                st.info(msg['回答'])
 
-            # 管理者回答エリア
-            if is_admin:
-                st.divider()
-                with st.expander("💬 回答を入力・更新する"):
-                    ans_text = st.text_area("回答内容", key=f"ans_{msg['ID']}")
-                    if st.button("回答を登録", key=f"btn_{msg['ID']}"):
-                        submit_answer(msg['ID'], ans_text, MASTER_CSV)
-                        st.success("回答を登録しました。")
-                        st.rerun()
-        else:
-            st.info("左側のリストからメッセージを選択してください。")
-def show_meeting_page():
-    """📖 勉強会資料：PPT/PDF対応・フォルダ管理機能"""
-    st.markdown("## 📖 勉強会資料ライブラリ")
-
-    # --- 1. ディレクトリ設定 ---
-    MEETING_DIR = os.path.join("assets", "drive_data", "meeting")
-    if not os.path.exists(MEETING_DIR):
-        os.makedirs(MEETING_DIR, exist_ok=True)
-
-    u_role = str(st.session_state.get('user', {}).get('role', '一般'))
-    is_admin = any(r in u_role for r in ["管理者", "教育係", "メンター"])
-
-    # --- 2. サイドバー：フォルダ管理 ---
-    with st.sidebar:
-        st.header("📂 フォルダ管理")
-
-        folders = sorted([f for f in os.listdir(MEETING_DIR) if os.path.isdir(os.path.join(MEETING_DIR, f))])
-
-        if is_admin:
-            with st.expander("🆕 新規フォルダ作成"):
-                new_folder_name = st.text_input("フォルダ名を入力", key="new_folder_input")
-                if st.button("フォルダを作成", use_container_width=True):
-                    if new_folder_name:
-                        new_path = os.path.join(MEETING_DIR, new_folder_name)
-                        if not os.path.exists(new_path):
-                            os.makedirs(new_path)
-                            st.success(f"作成: {new_folder_name}")
+            st.divider()
+            with st.expander("🗨️ 回答を追記する"):
+                ans_text = st.text_area("内容", key=f"ans_area_{msg['ID']}")
+                ans_anon = st.checkbox("匿名投稿", key=f"ans_anon_{msg['ID']}")
+                # width='stretch' へ置換
+                if st.button("回答を送信", key=f"ans_btn_{msg['ID']}", width='stretch'):
+                    if ans_text:
+                        if submit_answer(msg['ID'], ans_text, ans_anon, u_name, MASTER_CSV):
+                            st.success("回答を送信しました！")
                             st.rerun()
-                        else:
-                            st.warning("既に存在します")
 
-        if not folders:
-            st.info("フォルダを作成してください")
-            selected_folder = None
-        else:
-            selected_folder = st.selectbox("カテゴリを選択", folders)
-
-        # フォルダ削除の修正（安全な削除処理）
-        if is_admin and selected_folder:
-            st.divider()
-            st.warning(f"「{selected_folder}」を削除")
-            if st.button("🚨 フォルダを完全に消去", use_container_width=True):
-                try:
-                    target_path = os.path.join(MEETING_DIR, selected_folder)
-                    # フォルダを削除（中身があっても強制削除）
-                    shutil.rmtree(target_path, ignore_errors=True)
-                    st.toast(f"{selected_folder} を削除しました")
-                    time.sleep(0.5)  # 反映待ち
+            if is_admin or str(msg['ユーザーID']) == str(u_id):
+                st.write("")
+                # width='stretch' へ置換
+                if st.button("🗑️ 投稿を削除", type="secondary", width='stretch'):
+                    new_df = df[df['ID'].astype(str) != str(msg['ID'])]
+                    new_df.to_csv(MASTER_CSV, index=False, encoding="utf_8_sig")
+                    github_sync_engine(MASTER_CSV, mode="upload")
+                    st.toast("投稿を削除しました")
                     st.rerun()
-                except Exception as e:
-                    st.error(f"削除失敗: {e}")
-
-    # --- 3. メインエリア ---
-    if selected_folder:
-        folder_path = os.path.join(MEETING_DIR, selected_folder)
-
-        # PDFとPPT(x)を両方取得
-        files = sorted([f for f in os.listdir(folder_path)
-                        if f.lower().endswith(('.pdf', '.pptx', '.ppt'))])
-
-        col_list, col_view = st.columns([1, 2])
-
-        with col_list:
-            st.markdown(f"### 📁 {selected_folder}")
-
-            if is_admin:
-                with st.expander("📤 ファイルを追加"):
-                    # PDF, PPT, PPTXを許可
-                    uploaded_file = st.file_uploader("資料を選択", type=["pdf", "pptx", "ppt"])
-                    if uploaded_file:
-                        save_path = os.path.join(folder_path, uploaded_file.name)
-                        with open(save_path, "wb") as f:
-                            f.write(uploaded_file.getbuffer())
-                        st.success("アップロード完了")
-                        st.rerun()
-
-            st.divider()
-
-            if not files:
-                st.write("ファイルがありません")
-                selected_file = None
-            else:
-                selected_file = st.radio("資料を選択", files, key="meeting_file_radio")
-
-                if is_admin and selected_file:
-                    if st.button("🗑️ ファイルを削除"):
-                        os.remove(os.path.join(folder_path, selected_file))
-                        st.rerun()
-
-        with col_view:
-            if selected_file:
-                file_ext = os.path.splitext(selected_file)[1].lower()
-                full_path = os.path.join(folder_path, selected_file)
-
-                if file_ext == ".pdf":
-                    # PDFはプレビュー表示
-                    display_pdf(full_path)
-                else:
-                    # PowerPointはダウンロード案内
-                    st.markdown("#### 📊 PowerPoint資料")
-                    st.info("PowerPointファイルはブラウザで直接プレビューできません。ダウンロードしてご確認ください。")
-                    with open(full_path, "rb") as f:
-                        st.download_button(
-                            label=f"📥 {selected_file} をダウンロード",
-                            data=f,
-                            file_name=selected_file,
-                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                            use_container_width=True
-                        )
-                    # アイコン表示などで賑やかし
-                    st.image("https://img.icons8.com/color/144/powerpoint.png")
-            else:
-                st.info("資料を選択してください")
-    else:
-        st.info("フォルダを選択してください")
+        else:
+            st.info("左側から選択してください。")
+# ==========================================
+#　勉強会資料
+# ==========================================
 def display_pdf(file_path):
     """PDF表示用HTML"""
     try:
@@ -1848,14 +1699,206 @@ def display_pdf(file_path):
         st.markdown(pdf_display, unsafe_allow_html=True)
     except Exception as e:
         st.error(f"エラー: {e}")
+def show_study_page():
+    """📚 統合資料ライブラリ：階層フォルダ表示・マルチタイプ対応・即時同期版"""
+    st.markdown("## 📚 資料ライブラリ")
+
+    # --- 1. パス・権限・データ読み込み ---
+    BASE_DIR = "assets"
+    STORAGE_DIR = os.path.join(BASE_DIR, "drive_data", "materials")
+    CSV_FILE = os.path.join(BASE_DIR, "spread_data", "integrated_materials.csv")
+    os.makedirs(STORAGE_DIR, exist_ok=True)
+
+    if os.path.exists(CSV_FILE):
+        df = pd.read_csv(CSV_FILE, encoding="utf_8_sig").fillna("")
+    else:
+        df = pd.DataFrame(columns=["大カテゴリー", "小カテゴリー", "タイトル", "タイプ", "ファイル名", "URL", "登録者"])
+
+    user = st.session_state.get('user', {})
+    u_id = user.get('id', 'default_user')
+    u_name = user.get('name', 'Unknown')
+    u_role = str(user.get('role', '一般'))
+    is_admin = any(r in u_role for r in ["管理者", "教育係", "メンター"])
+
+    # --- 2. フィルター設定 ---
+    sub_cats = {
+        "内規": ["調剤室業務", "注射室業務"],
+        "薬剤と疾患": ["精神神経・筋疾患", "骨・関節疾患", "免疫疾患", "心臓・血管系疾患", "腎・泌尿器疾患",
+                  "産科婦人科疾患", "呼吸器疾患", "消化器疾患", "血液及び造血器疾患",
+                  "感覚器疾患", "内分泌・代謝疾患", "皮膚疾患", "感染症", "悪性腫瘍", "その他"],
+        "チーム": ["感染(ICT)", "栄養(NST)", "緩和(PCT)"],
+        "その他": ["その他"]
+    }
+
+    col_f1, col_f2, col_f3 = st.columns([1, 1, 1])
+    with col_f1:
+        p_filter = st.selectbox("📁 大カテゴリ絞り込み", ["すべて"] + list(sub_cats.keys()))
+    with col_f2:
+        min_opts = ["すべて"] + sub_cats[p_filter] if p_filter != "すべて" else ["すべて"]
+        c_filter = st.selectbox("📂 小カテゴリ絞り込み", min_opts)
+    with col_f3:
+        st.write("")
+        if st.button("➕ 新規資料を登録", use_container_width=True, type="primary"):
+            st.session_state.adding_material = True
+            st.rerun()
+
+    st.divider()
+
+    # --- 3. メインレイアウト ---
+    col_tree, col_view = st.columns([1.2, 1.8])
+
+    with col_tree:
+        st.markdown(f"#### 📂 フォルダ一覧 ({len(df)}個)")
+        target_majors = [p_filter] if p_filter != "すべて" else list(sub_cats.keys())
+
+        for major in target_majors:
+            major_df = df[df["大カテゴリー"] == major]
+            major_count = len(major_df)
+
+            with st.expander(f"📁 {major} ({major_count}個)", expanded=(p_filter != "すべて")):
+                target_minors = [c_filter] if c_filter != "すべて" else sub_cats.get(major, ["その他"])
+
+                for minor in target_minors:
+                    minor_df = major_df[major_df["小カテゴリー"] == minor]
+                    minor_count = len(minor_df)
+
+                    if minor_count > 0 or c_filter != "すべて":
+                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;**📂 {minor} ({minor_count}個)**")
+                        for idx, row in minor_df.iterrows():
+                            # タイプと拡張子に応じたラベル表示の切り替え
+                            if row["タイプ"] == "URL":
+                                type_label = "(URL)"
+                            else:
+                                ext = os.path.splitext(row["ファイル名"])[1].lower()
+                                if ext in [".doc", ".docx"]:
+                                    type_label = "(Word)"
+                                elif ext in [".ppt", ".pptx"]:
+                                    type_label = "(PPT)"
+                                elif ext == ".pdf":
+                                    type_label = "(PDF)"
+                                else:
+                                    type_label = "(File)"
+
+                            if st.button(f"📄 {row['タイトル']} {type_label}", key=f"mat_{idx}", use_container_width=True):
+                                st.session_state.selected_material_idx = idx
+                                st.session_state.adding_material = False
+                                st.rerun()
+
+    with col_view:
+        # --- A. 新規登録画面（Word対応・同期処理付き） ---
+        if st.session_state.get('adding_material'):
+            with st.container(border=True):
+                st.subheader("🆕 新規資料の登録")
+                n_p = st.selectbox("大カテゴリ", list(sub_cats.keys()))
+                n_c = st.selectbox("小カテゴリ", sub_cats[n_p])
+                n_title = st.text_input("タイトル", placeholder="例：2024年度 感染対策マニュアル")
+                n_type = st.radio("資料の形式", ["URL(リンク)", "ファイル(PDF/PPT/Word)"], horizontal=True)
+
+                n_url, n_fname = "", ""
+                n_up = None
+                if n_type == "URL(リンク)":
+                    n_url = st.text_input("🌐 URLを入力")
+                else:
+                    # typeに docx, doc を追加
+                    n_up = st.file_uploader("ファイルを選択", type=["pdf", "pptx", "ppt", "docx", "doc"])
+                    if n_up: n_fname = n_up.name
+
+                st.divider()
+                if st.button("💾 登録して同期", type="primary", use_container_width=True):
+                    if n_title and (n_url or n_fname):
+                        with st.spinner("保存中..."):
+                            # ファイル保存処理
+                            if n_type != "URL(リンク)" and n_up:
+                                with open(os.path.join(STORAGE_DIR, n_fname), "wb") as f:
+                                    f.write(n_up.getbuffer())
+
+                            # CSV更新
+                            new_row = {
+                                "大カテゴリー": n_p, "小カテゴリー": n_c, "タイトル": n_title,
+                                "タイプ": "URL" if n_type == "URL(リンク)" else "FILE",
+                                "ファイル名": n_fname, "URL": n_url, "登録者": u_name
+                            }
+                            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                            df.to_csv(CSV_FILE, index=False, encoding="utf_8_sig")
+
+                        # --- GitHub同期実行 ---
+                        with st.status("📥 GitHubへ同期中...") as status:
+                            try:
+                                sync_user_assets(u_id, mode="upload", scope="drive")
+                                status.update(label="✅ 同期完了", state="complete")
+                                st.success(f"『{n_title}』を登録・同期しました！")
+                                time.sleep(1)
+                                st.session_state.adding_material = False
+                                st.rerun()
+                            except Exception as e:
+                                status.update(label="❌ 同期失敗", state="error")
+                                st.error(f"同期に失敗しました。終了時に再度お試しください: {e}")
+                    else:
+                        st.error("タイトルと、URLまたはファイルは必須です。")
+
+                if st.button("キャンセル"):
+                    st.session_state.adding_material = False
+                    st.rerun()
+
+        # --- B. 詳細表示画面 ---
+        elif st.session_state.get('selected_material_idx') is not None:
+            idx = st.session_state.selected_material_idx
+            if idx in df.index:
+                data = df.loc[idx]
+                st.subheader(data["タイトル"])
+                st.caption(f"📍 {data['大カテゴリー']} > {data['小カテゴリー']} | 👤 登録: {data['登録者']}")
+
+                with st.container(border=True):
+                    if data["タイプ"] == "URL":
+                        st.success(f"🔗 URL: {data['URL']}")
+                        st.link_button("🌐 リンク先を開く", data["URL"], use_container_width=True)
+                    else:
+                        f_path = os.path.join(STORAGE_DIR, data["ファイル名"])
+                        if os.path.exists(f_path):
+                            ext = os.path.splitext(data["ファイル名"])[1].lower()
+                            if ext == ".pdf":
+                                display_pdf(f_path)
+                            elif ext in [".docx", ".doc"]:
+                                st.info("Wordファイルは直接プレビューできません。ダウンロードして確認してください。")
+                                with open(f_path, "rb") as f:
+                                    st.download_button("📥 ダウンロード (Word)", f, file_name=data["ファイル名"],
+                                                       use_container_width=True)
+                            else:
+                                st.info(f"{ext.upper()}ファイルはダウンロードして確認してください。")
+                                with open(f_path, "rb") as f:
+                                    st.download_button(f"📥 ダウンロード ({ext.replace('.', '').upper()})", f,
+                                                       file_name=data["ファイル名"],
+                                                       use_container_width=True)
+                        else:
+                            st.error("ファイルが見つかりません。")
+
+                if is_admin or data["登録者"] == u_name:
+                    if st.button("🗑️ この資料を削除"):
+                        with st.spinner("削除中..."):
+                            df = df.drop(idx)
+                            df.to_csv(CSV_FILE, index=False, encoding="utf_8_sig")
+                            # 削除時も同期
+                            sync_user_assets(u_id, mode="upload", scope="drive")
+                            st.session_state.selected_material_idx = None
+                            st.rerun()
+                        if data["タイプ"] == "FILE":
+                            f_real_path = os.path.join(STORAGE_DIR, data["ファイル名"])
+                            if os.path.exists(f_real_path):
+                                os.remove(f_real_path)
+        else:
+            st.info("📂 左のフォルダから資料を選択してください。")
+# ==========================================
+#　日誌関連
+# ==========================================
 def show_diary_page():
     """📔 業務・学習日誌ページ"""
     st.markdown("## 📔 業務・学習日誌ポートフォリオ")
 
     # --- 1. ユーザー情報とパス設定 ---
-    u_id = st.session_state.get('user', {}).get('id', 'guest')
-    u_name = st.session_state.get('user', {}).get('name', 'Unknown')
-    u_role = str(st.session_state.get('user', {}).get('role', '一般'))
+    user = st.session_state.get('user', {})
+    u_id = user.get('id', 'guest')
+    u_name = user.get('name', 'Unknown')
+    u_role = str(user.get('role', '一般'))
 
     # ユーザー専用ディレクトリ
     USER_DIR = os.path.join("assets", "users", str(u_id))
@@ -1882,7 +1925,7 @@ def show_diary_page():
                 lambda x: f"📅 {x['日付']} {'💬' if pd.notna(x['コメント']) and x['コメント'].strip() else ''}", axis=1
             )
 
-            # リストから選択（初期値は「新規作成」相当としてNoneを扱えるようにする）
+            # リストから選択
             list_options = ["🆕 新規作成"] + df_display["日付"].tolist()
             selected_date = st.radio("記録を選択", list_options)
         else:
@@ -1890,8 +1933,6 @@ def show_diary_page():
             selected_date = "🆕 新規作成"
 
     # --- 3. メインエリア：編集・閲覧 ---
-
-    # モード判定
     is_new = (selected_date == "🆕 新規作成")
 
     if is_new:
@@ -1928,7 +1969,7 @@ def show_diary_page():
     col_save, col_del, col_space = st.columns([1, 1, 2])
 
     with col_save:
-        if st.button("💾 日誌を保存", type="primary", use_container_width=True):
+        if st.button("💾 日誌を保存して同期", type="primary", use_container_width=True):
             if not content.strip():
                 st.error("内容を入力してください。")
             else:
@@ -1936,29 +1977,36 @@ def show_diary_page():
                 new_row = {"日付": current_date, "内容": content, "コメント": current_comment}
 
                 if is_new:
-                    # 同じ日付が既にないかチェック
                     if current_date in df["日付"].values:
-                        # 上書き
                         df.loc[df["日付"] == current_date, ["内容", "コメント"]] = [content, current_comment]
                     else:
-                        # 新規追加
                         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                        # 経験値獲得のメッセージ（実際の加算処理はシステムに合わせて呼び出し）
                         st.toast("経験値を獲得しました！(+10 EXP)")
                 else:
                     df.loc[df["日付"] == current_date, ["内容", "コメント"]] = [content, current_comment]
 
+                # ローカル保存
                 df.to_csv(DIARY_CSV, index=False, encoding="utf_8_sig")
-                st.success(f"{current_date} の記録を保存しました。")
-                time.sleep(1)
-                st.rerun()
+
+                # --- GitHub同期実行 ---
+                with st.status("📥 クラウドへ同期中...") as status:
+                    try:
+                        sync_user_assets(u_id, mode="upload", scope="user")
+                        status.update(label="✅ 保存・同期完了", state="complete")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        status.update(label="❌ 同期失敗", state="error")
+                        st.error(f"保存はされましたが同期に失敗しました: {e}")
 
     with col_del:
         if not is_new:
             if st.button("🗑 記録を削除", use_container_width=True):
                 df = df[df["日付"] != current_date]
                 df.to_csv(DIARY_CSV, index=False, encoding="utf_8_sig")
-                st.warning("記録を削除しました。")
+                # 削除時も同期
+                sync_user_assets(u_id, mode="upload", scope="user")
+                st.warning("記録を削除し、同期しました。")
                 time.sleep(1)
                 st.rerun()
 
@@ -1969,16 +2017,22 @@ def show_diary_page():
         st.divider()
         st.subheader("👨‍🏫 指導者用フィードバック入力")
         new_comment = st.text_area("アドバイス・返信", value=current_comment, key="mentor_comment")
-        if st.button("コメントを登録", use_container_width=True):
-            df.loc[df["日付"] == current_date, "コメント"] = new_comment
-            df.to_csv(DIARY_CSV, index=False, encoding="utf_8_sig")
-            st.success("フィードバックを登録しました。")
-            time.sleep(1)
-            st.rerun()
-# --- 1. 共通定数の設定 ---
-ASSETS_DIR = "assets"
-LOGIN_CSV = "login_data.csv"
-TASK_CSV = "assets/spread_data/task_list.csv"
+        if st.button("コメントを登録・同期", use_container_width=True):
+            with st.spinner("反映中..."):
+                df.loc[df["日付"] == current_date, "コメント"] = new_comment
+                df.to_csv(DIARY_CSV, index=False, encoding="utf_8_sig")
+
+                # 指導者側の操作も即座に同期
+                try:
+                    sync_user_assets(u_id, mode="upload", scope="user")
+                    st.success("フィードバックを登録・同期しました。")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"同期に失敗しました: {e}")
+# ==========================================
+#　教育者画面
+# ==========================================
 def show_mentor_page():
     """教育者用コンソールのメインエントリポイント"""
     st.sidebar.markdown("### 🛠️ Mentor Console")
@@ -2002,124 +2056,221 @@ def show_mentor_page():
         render_matrix_view()
     elif menu == "📋 チェックリスト編集":
         render_checklist_editor()
-# ==========================================
-# 1. 進捗ダッシュボード & 個別詳細
-# ==========================================
 def render_dashboard_view():
     st.title("新人薬剤師 育成進捗一覧")
 
-    if not os.path.exists(LOGIN_CSV):
-        st.error("ユーザーデータ(login_data.csv)が見つかりません。")
+    # マスター読み込み
+    if not os.path.exists(LOGIN_CSV) or not os.path.exists(TASK_CSV):
+        st.error("マスターデータが見つかりません。")
         return
 
-    # ユーザーリスト読み込み
     df_users = pd.read_csv(LOGIN_CSV, encoding="utf_8_sig")
     newcomers = df_users[df_users['role'].isin(["新人薬剤師", "新人"])]
-
-    # タスク合計数の把握
-    total_tasks = {"調剤室業務": 0, "注射室業務": 0}
-    if os.path.exists(TASK_CSV):
-        df_tasks = pd.read_csv(TASK_CSV, encoding="utf_8_sig")
-        for cat in total_tasks.keys():
-            total_tasks[cat] = len(df_tasks[df_tasks['カテゴリ'] == cat])
+    df_tasks_master = pd.read_csv(TASK_CSV, encoding="utf_8_sig")
 
     summary_list = []
     for _, user in newcomers.iterrows():
-        user_id = str(user['id'])
-        p_path = f"{ASSETS_DIR}/users/{user_id}/my_progress.csv"
+        u_id = str(user['id'])
+        p_path = os.path.join(USERS_DIR, u_id, "my_progress.csv")
 
-        counts = {"調剤室業務": 0, "注射室業務": 0}
-        status = "未ログイン"
+        row_data = {"新人氏名": user['name'], "ID": u_id}
 
-        if os.path.exists(p_path):
-            try:
-                df_p = pd.read_csv(p_path, encoding="utf_8_sig")
-                for cat in counts.keys():
-                    counts[cat] = len(df_p[df_p['カテゴリ'] == cat])
-                status = "利用中"
-            except:
-                status = "データエラー"
+        # ユーザー進捗読み込み
+        df_user_p = pd.read_csv(p_path, encoding="utf_8_sig") if os.path.exists(p_path) else pd.DataFrame(
+            columns=['カテゴリ', '項目', '習得度'])
 
-        def make_bar_text(d, t):
-            if t <= 0: return "□□□□□□□□□□ 0%"
-            p = min(100, int((d / t) * 100))
-            bar = '■' * (p // 10) + '□' * (10 - (p // 10))
-            return f"{bar} {p}%"
+        # カテゴリ別に進捗率を計算
+        for cat_name in ["調剤室業務", "注射室業務"]:
+            # マスターからそのカテゴリの全項目を抽出
+            m_sub = df_tasks_master[df_tasks_master['カテゴリ'] == cat_name]
+            total_items = len(m_sub)
 
-        summary_list.append({
-            "ID": user_id,
-            "新人氏名": user['name'],
-            "調剤室業務 進捗": make_bar_text(counts["調剤室業務"], total_tasks["調剤室業務"]),
-            "注射室業務 進捗": make_bar_text(counts["注射室業務"], total_tasks["注射室業務"]),
-            "状態": status
-        })
+            if total_items > 0:
+                # ユーザーデータとマスターをマージして未着手分(1)を補完
+                merged = pd.merge(m_sub[['項目']], df_user_p[df_user_p['カテゴリ'] == cat_name][['項目', '習得度']], on='項目',
+                                  how='left')
+                merged['習得度'] = merged['習得度'].fillna(1).astype(int)
 
-    df_summary = pd.DataFrame(summary_list)
-    st.dataframe(df_summary.drop(columns=["ID"]), width='stretch', hide_index=True)
-
-    # --- 個別詳細セクション ---
-    st.divider()
-    if not df_summary.empty:
-        selected_name = st.selectbox("詳細を確認する新人を選択", df_summary['新人氏名'])
-
-        if st.button(f"👤 {selected_name} さんの個別詳細・指導画面を表示", width='stretch'):
-            st.session_state.target_user = df_summary[df_summary['新人氏名'] == selected_name].iloc[0]
-            st.session_state.show_detail = True
-
-    # 詳細画面が表示フラグが立っている場合
-    if st.session_state.get('show_detail'):
-        render_individual_detail(st.session_state.target_user)
-def render_individual_detail(user):
-    """特定のユーザーの進捗・日誌を深く確認し、指導コメントを残す"""
-    st.markdown(f"---")
-    st.subheader(f"📊 {user['新人氏名']} さんの詳細状況")
-
-    t1, t2, t3 = st.tabs(["📔 日誌指導", "📋 実務進捗", "🏆 成績推移"])
-
-    with t1:
-        d_path = f"{ASSETS_DIR}/users/{user['ID']}/diary.csv"
-        if os.path.exists(d_path):
-            df_diary = pd.read_csv(d_path, encoding="utf_8_sig")
-            if not df_diary.empty:
-                dates = df_diary['日付'].tolist()
-                sel_date = st.selectbox("指導する日付を選択", dates)
-                day_data = df_diary[df_diary['日付'] == sel_date].iloc[0]
-
-                st.info(f"**新人記入内容:**\n\n{day_data['内容']}")
-
-                mentor_note = st.text_area("✍ メンターコメント", value=str(day_data.get('コメント', '')), key=f"note_{user['ID']}")
-                if st.button("指導コメントを保存"):
-                    df_diary.loc[df_diary['日付'] == sel_date, 'コメント'] = mentor_note
-                    df_diary.to_csv(d_path, index=False, encoding="utf_8_sig")
-                    st.success("コメントを保存しました。")
+                # 進捗計算: (合計スコア - 項目数*1) / (項目数*4) ※習得度1=0%, 5=100%
+                current_sum = merged['習得度'].sum()
+                perc = int(((current_sum - total_items) / (total_items * 4)) * 100)
+                row_data[f"{cat_name} 進捗"] = max(0, min(100, perc))
             else:
-                st.write("まだ日誌の記入がありません。")
-        else:
-            st.warning("日誌ファイルが存在しません。")
+                row_data[f"{cat_name} 進捗"] = 0
 
+        summary_list.append(row_data)
+
+    # 進捗一覧の表示
+    if summary_list:
+        df_summary = pd.DataFrame(summary_list)
+        st.dataframe(
+            df_summary.drop(columns=["ID"]),
+            column_config={
+                "調剤室業務 進捗": st.column_config.ProgressColumn("調剤室", format="%d%%", min_value=0, max_value=100),
+                "注射室業務 進捗": st.column_config.ProgressColumn("注射室", format="%d%%", min_value=0, max_value=100),
+            },
+            hide_index=True, width='stretch'
+        )
+
+    st.divider()
+    selected_name = st.selectbox("詳細を確認する新人を選択", [s["新人氏名"] for s in summary_list])
+    if st.button(f"👤 {selected_name} さんの個別詳細を表示", width='stretch'):
+        st.session_state.target_user = next(item for item in summary_list if item["新人氏名"] == selected_name)
+        st.session_state.show_detail = True
+
+    if st.session_state.get('show_detail'):
+        render_individual_detail(st.session_state.target_user, df_tasks_master)
+def render_individual_detail(user, df_tasks_master):
+    u_id = str(user['ID'])
+    user_path = os.path.join(USERS_DIR, u_id)
+
+    # 外部マスターと個人ファイルのパス
+    QUESTIONS_CSV = "assets/spread_data/questions.csv"
+    RESULTS_CSV = os.path.join(user_path, "my_all_results.csv")
+    DIARY_CSV = os.path.join(user_path, "diary.csv")
+    PROGRESS_CSV = os.path.join(user_path, "my_progress.csv")
+    TEST_RESULTS_CSV = os.path.join(user_path, "my_test_results.csv")
+
+    t1, t2, t3, t4 = st.tabs(["📔 日誌指導", "📋 実務進捗", "📝 テスト結果", "⚖️ 内規成績"])
+
+    # --- T1: 日誌指導 ---
+    with t1:
+        if os.path.exists(DIARY_CSV):
+            df_d = pd.read_csv(DIARY_CSV, encoding="utf_8_sig").fillna('')
+            if not df_d.empty:
+                # 文字列クレンジング
+                df_d['日付'] = df_d['日付'].astype(str).str.strip()
+                dates = sorted(df_d['日付'].unique().tolist(), reverse=True)
+                sel_date = st.selectbox("指導日を選択", dates, key=f"d_sel_{u_id}")
+                day = df_d[df_d['日付'] == sel_date].iloc[0]
+
+                st.markdown("**【本人の記入内容】**")
+                st.info(str(day['内容']).strip() if str(day['内容']).strip() != "" else "（未記入）")
+
+                comment = st.text_area("✍ メンターコメント", value=str(day.get('コメント', '')).replace('nan', ''),
+                                       key=f"cmt_{u_id}_{sel_date}")
+                if st.button("指導内容を保存", width='stretch'):
+                    df_d.loc[df_d['日付'] == sel_date, 'コメント'] = comment
+                    df_d.to_csv(DIARY_CSV, index=False, encoding="utf_8_sig")
+                    if "github_sync_engine" in globals():
+                        github_sync_engine(DIARY_CSV, mode="upload")
+                    st.success("保存と同期が完了しました。")
+        else:
+            st.info("日誌データがありません。")
+
+    # --- T2: 実務進捗 (マスター補完ロジック) ---
     with t2:
-        p_path = f"{ASSETS_DIR}/users/{user['ID']}/my_progress.csv"
-        if os.path.exists(p_path):
-            st.dataframe(pd.read_csv(p_path, encoding="utf_8_sig"), width='stretch')
-        else:
-            st.info("進捗データがありません。")
+        df_user_p = pd.read_csv(PROGRESS_CSV, encoding="utf_8_sig") if os.path.exists(PROGRESS_CSV) else pd.DataFrame(
+            columns=['カテゴリ', '項目', '習得度'])
+        # 警告対策: mapを使用
+        df_user_p = df_user_p.map(lambda x: x.strip() if isinstance(x, str) else x)
 
+        c1, c2 = st.columns(2)
+        for i, cat in enumerate(["調剤室業務", "注射室業務"]):
+            with [c1, c2][i]:
+                st.markdown(f"**【{cat}】**")
+                m_sub = df_tasks_master[df_tasks_master['カテゴリ'] == cat][['項目']]
+                u_sub = df_user_p[df_user_p['カテゴリ'] == cat][['項目', '習得度']]
+                # 未着手項目を1で補完
+                display_df = pd.merge(m_sub, u_sub, on='項目', how='left').fillna(1)
+                display_df['習得度'] = display_df['習得度'].astype(int)
+                st.dataframe(display_df, hide_index=True, width='stretch')
+
+    # --- T3: テスト結果 ---
     with t3:
-        r_path = f"{ASSETS_DIR}/users/{user['ID']}/my_test_results.csv"
-        if os.path.exists(r_path):
-            df_res = pd.read_csv(r_path, encoding="utf_8_sig")
-            if not df_res.empty:
-                st.line_chart(df_res.set_index('実施日')['得点'])
-            st.dataframe(df_res, width='stretch')
+        if os.path.exists(TEST_RESULTS_CSV):
+            st.dataframe(pd.read_csv(TEST_RESULTS_CSV, encoding="utf_8_sig"), hide_index=True, width='stretch')
         else:
-            st.info("テスト履歴がありません。")
+            st.info("テスト履歴なし")
 
-    if st.button("詳細画面を閉じる"):
+    # --- T4: 内規成績 (review関数のロジックを完全移植) ---
+    with t4:
+        if not os.path.exists(QUESTIONS_CSV):
+            st.error("問題マスターが見つかりません。")
+        else:
+            # 1. マスターから「内規」だけを抽出
+            df_q_rules = pd.read_csv(QUESTIONS_CSV, encoding="utf_8_sig")
+            df_q_rules = df_q_rules[df_q_rules["大項目"] == "内規"].copy()
+
+            # 2. 個人の成績を辞書化 (最新の判定・回答を保持)
+            stats = {}
+            if os.path.exists(RESULTS_CSV):
+                df_results = pd.read_csv(RESULTS_CSV, encoding="utf_8_sig").fillna('')
+                for _, row in df_results.iterrows():
+                    q_text = str(row.iloc[3]).strip()
+                    stats[q_text] = {
+                        "date": row.iloc[0],
+                        "res": row.iloc[2],
+                        "ans": row.iloc[4]
+                    }
+
+            # 3. マスター基準で表示用データを作成 (未回答も含める)
+            display_data = []
+            for _, row in df_q_rules.iterrows():
+                q_txt = str(row["問題文"]).strip()
+                h = stats.get(q_txt)
+
+                display_data.append({
+                    "最新回答日時": h["date"] if h else "-",
+                    "小項目": row["小項目"],
+                    "レベル": row["レベル"],
+                    "問題文": q_txt,
+                    "最新成績": h["res"] if h else "未回答",
+                    "最新回答": h["ans"] if h else "-",
+                    "解答": row["解答"],
+                    "解説": row["解説"]
+                })
+
+            res_df = pd.DataFrame(display_data)
+
+            # 4. 統計表示
+            ans_count = len(res_df[res_df['最新成績'] != '未回答'])
+            total_count = len(res_df)
+            st.metric("内規既習率", f"{int(ans_count / total_count * 100) if total_count > 0 else 0}%",
+                      f"{ans_count}/{total_count} 問")
+
+            # 5. 成績フィルタ
+            sel_res = st.selectbox("成績で絞り込み", ["すべて", "正解", "不正解", "未回答"], key=f"f_res_{u_id}")
+            if sel_res != "すべて":
+                res_df = res_df[res_df["最新成績"] == sel_res]
+
+            # 6. メインテーブル (reviewページと同様)
+            view_cols = ["最新回答日時", "小項目", "レベル", "問題文", "最新成績"]
+            selected_event = st.dataframe(
+                res_df[view_cols],
+                use_container_width=True,
+                height=350,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row"
+            )
+
+            # 7. 詳細プレビュー (reviewページのUIを継承)
+            selected_rows = selected_event.selection.rows
+            if selected_rows:
+                st.divider()
+                q_detail = res_df.iloc[selected_rows[0]]
+                with st.container(border=True):
+                    st.markdown(f"### 🔍 解答詳細プレビュー")
+                    st.markdown(f"**【問題文】**\n{q_detail['問題文']}")
+
+                    p_col1, p_col2, p_col3 = st.columns(3)
+                    with p_col1:
+                        st.write(f"🔹 **成績:** {q_detail['最新成績']}")
+                    with p_col2:
+                        st.write(f"👤 **本人の回答:** {q_detail['最新回答']}")
+                    with p_col3:
+                        st.write(f"📅 **最終回答日:** {q_detail['最新回答日時']}")
+
+                    if q_detail['最新成績'] != "未回答":
+                        st.success(f"**【模範解答】**\n{q_detail['解答']}")
+                        st.info(f"**【解説】**\n{q_detail['解説']}")
+                    else:
+                        st.warning("この問題はまだ解答されていません。")
+
+    if st.button("× 詳細を閉じる", width='stretch'):
         st.session_state.show_detail = False
         st.rerun()
-# ==========================================
-# 2. 全員比較マトリックス
-# ==========================================
 def render_matrix_view():
     st.title("📊 全員比較マトリックス")
 
@@ -2137,45 +2288,72 @@ def render_matrix_view():
         st.warning("表示対象を選択してください。")
         return
 
-    matrix = df_tasks.copy()
+    # 全員分のスコアを辞書に格納 (読み込み回数を減らす)
+    all_scores = {}
     for _, user in newcomers.iterrows():
         if user['name'] not in selected_names: continue
-
-        p_path = f"{ASSETS_DIR}/users/{user['id']}/my_progress.csv"
-        scores = {}
+        p_path = f"assets/users/{user['id']}/my_progress.csv"
         if os.path.exists(p_path):
             try:
                 df_p = pd.read_csv(p_path, encoding="utf_8_sig")
-                scores = dict(zip(df_p['項目'], df_p['習得度']))
+                # 文字列クレンジング
+                df_p = df_p.map(lambda x: x.strip() if isinstance(x, str) else x)
+                all_scores[user['name']] = dict(zip(df_p['項目'], df_p['習得度']))
             except:
-                pass
+                all_scores[user['name']] = {}
+        else:
+            all_scores[user['name']] = {}
 
-        def convert_score(v):
-            v = str(v)
-            return v.count("★") if "★" in v else (int(v) if v.isdigit() else 0)
+    def get_score(item_name, user_name):
+        v = all_scores.get(user_name, {}).get(item_name, 1)  # デフォルトは習得度1
+        v_str = str(v)
+        return v_str.count("★") if "★" in v_str else (int(v_str) if v_str.isdigit() else 1)
 
-        matrix[user['name']] = matrix['項目'].apply(lambda x: convert_score(scores.get(x, 0)))
+    # 業務カテゴリごとに分割表示
+    categories = ["調剤室業務", "注射室業務"]
+    matrix_dfs = {}
 
-    st.dataframe(matrix, width='stretch', hide_index=True)
+    for cat in categories:
+        st.subheader(f"📍 {cat}")
+        # カテゴリでフィルタリング
+        df_cat = df_tasks[df_tasks['カテゴリ'] == cat].copy()
 
-    # Excelダウンロード
-    try:
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            matrix.to_excel(writer, index=False, sheet_name='進捗比較')
+        if df_cat.empty:
+            st.info(f"{cat}の項目は定義されていません。")
+            continue
 
-        st.download_button(
-            label="📗 Excelレポートをダウンロード",
-            data=output.getvalue(),
-            file_name=f"進捗レポート_{datetime.now().strftime('%Y%m%d')}.xlsx",  # ← ここでエラーが出ていました
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            width='stretch'
-        )
-    except Exception as e:
-        st.error(f"Excel作成エラー (xlsxwriterが必要): {e}")
-# ==========================================
-# 3. チェックリスト編集
-# ==========================================
+        # 各ユーザーの列を追加
+        for name in selected_names:
+            df_cat[name] = df_cat['項目'].apply(lambda x: get_score(x, name))
+
+        # 画面表示 (1～5の数値で表示される)
+        st.dataframe(df_cat, width='stretch', hide_index=True)
+        matrix_dfs[cat] = df_cat
+
+    st.divider()
+
+    # Excelダウンロード (複数シート対応)
+    if matrix_dfs:
+        try:
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                for cat, df_to_save in matrix_dfs.items():
+                    # シート名に不適切な文字を除去して保存
+                    sheet_name = cat[:31]
+                    df_to_save.to_excel(writer, index=False, sheet_name=sheet_name)
+
+                # スタイル調整（オプション：1番目のシートを選択状態に）
+                writer.book.worksheets()[0].activate()
+
+            st.download_button(
+                label="📗 Excelレポートをダウンロード (全部門)",
+                data=output.getvalue(),
+                file_name=f"進捗比較マトリックス_{datetime.datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                width='stretch'
+            )
+        except Exception as e:
+            st.error(f"Excel作成エラー: {e}")
 def render_checklist_editor():
     st.title("📋 実務チェックリスト項目編集")
 
@@ -2192,10 +2370,9 @@ def render_checklist_editor():
         st.success("タスクリストを更新しました。")
         time.sleep(1)
         st.rerun()
-# --- 定数設定（Tkinter版のパスを継承） ---
-IN_DATA_DIR = "assets/spread_data"
-OUT_DATA_DIR = "assets/drive_data"
-ASSETS_DIR = "assets"
+# ==========================================
+#　検索関連
+# ==========================================
 def show_search_page():
     st.title("🔍 P-QUEST 統合検索システム")
 
@@ -2274,7 +2451,6 @@ def show_search_page():
     if st.button("🏠 メインメニューへ戻る", width='stretch'):
         st.session_state.page = "main"
         st.rerun()
-# --- 履歴管理用補助関数 ---
 def save_search_log(query):
     """個人の検索履歴を保存（assets/users/ID/search_history.csv）"""
     if 'user' not in st.session_state: return
@@ -2286,7 +2462,7 @@ def save_search_log(query):
 
     with open(log_path, "a", encoding="utf_8_sig", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M"), query])
+        writer.writerow([datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), query])
 def get_search_ranking():
     """全ユーザーの履歴を集計して上位10件を返す"""
     all_queries = []
@@ -2305,6 +2481,9 @@ def get_search_ranking():
                     pass
 
     return Counter(all_queries).most_common(10)
+# ==========================================
+#　シミュレーション関連
+# ==========================================
 def show_simulation_page():
     # サブページの初期化
     if 'sub_page' not in st.session_state:
@@ -2712,9 +2891,15 @@ def show_regimen_simulation():
     if st.button("🏠 シミュレーションメニューに戻る", use_container_width=True):
         st.session_state['sub_page'] = 'menu'
         st.rerun()
-# --- 5. メイン制御 ---
+# ==========================================
+# ==========================================
+# ==========================================
+#　main
+# ==========================================
+# ==========================================
+# ==========================================
 def main():
-    # --- 1. 状態の初期化 ---
+    # --- 1. 状態の初期化 --- (省略なし)
     if 'user' not in st.session_state:
         st.session_state['user'] = {'name': 'ゲスト', 'id': 'guest'}
     if 'is_staff_confirmed' not in st.session_state: st.session_state['is_staff_confirmed'] = False
@@ -2741,15 +2926,13 @@ def main():
             show_staff_confirmation_page()
         return
 
-    # --- 【重要追加】ログイン直後のGitHubデータロード ---
+    # --- 📥 ログイン直後のデータロード（これだけは残す） ---
     if st.session_state['logged_in'] and not st.session_state.get('github_loaded', False):
         u_id = st.session_state['user'].get('id')
         if u_id and u_id != 'guest':
-            with st.status("📥 データを同期中...", expanded=False) as status:
-                # 引数に u_id を追加
+            with st.status("📥 最新データを取得中...", expanded=False) as status:
                 sync_all_assets_recursive(u_id, mode="download")
                 status.update(label="✅ 同期完了", state="complete")
-
             st.session_state['github_loaded'] = True
             st.rerun()
 
@@ -2758,17 +2941,16 @@ def main():
     u_role = str(st.session_state.get('user', {}).get('role', '一般'))
     is_mentor_staff = any(r in u_role for r in ["管理者", "教育係", "メンター"])
 
+    # サイドバーの共通クリーンアップ処理
     if current_page != 'main':
         with st.sidebar:
             st.markdown("---")
             if st.button("🏠 メインメニューへ", use_container_width=True):
                 st.session_state['page'] = 'main'
-                if 'sub_page' in st.session_state: st.session_state['sub_page'] = 'menu'
-                st.session_state['quiz_started'] = False
+                # 各種フラグのリセット
                 st.session_state.forum_view = "list"
-                st.session_state.temp_title = ""
-                if "selected_mentor_user" in st.session_state: del st.session_state["selected_mentor_user"]
-                if "show_detail" in st.session_state: st.session_state.show_detail = False
+                if "adding_material" in st.session_state: st.session_state.adding_material = False
+                if "selected_material_idx" in st.session_state: st.session_state.selected_material_idx = None
                 st.rerun()
 
     # --- 4. ページ分岐ロジック ---
@@ -2776,11 +2958,15 @@ def main():
         if st.session_state['is_guest']:
             show_guest_menu()
         else:
-            # メインメニュー内で「終了」ボタンが押された際の同期は show_main_menu 内に記述
+            # show_main_menu内での「終了」ボタンは、
+            # すでに都度同期しているので、単にログアウト処理だけでOKにできます。
             show_main_menu()
 
-    elif current_page == 'study':
+    elif current_page in ['study', 'meeting']:
         show_study_page()
+
+    elif current_page == 'progress_view':
+        show_progress_page()
 
     elif current_page == 'quiz':
         if st.session_state.get('quiz_started'):
@@ -2799,9 +2985,6 @@ def main():
             st.error("この機能は職員専用です。")
         else:
             show_message_hub()
-
-    elif current_page == 'meeting':
-        show_meeting_page()
 
     elif current_page == 'diary':
         if st.session_state['is_guest']:
