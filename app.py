@@ -1950,7 +1950,7 @@ def show_diary_page():
 
     if is_new:
         st.subheader("📝 本日の学びを記録する")
-        current_date = datetime.date.today().strftime("%Y-%m-%d")
+        current_date = datetime.now().date().strftime("%Y-%m-%d")
         default_content = ""
         current_comment = ""
         badge_text = "新規作成"
@@ -3015,10 +3015,6 @@ def show_kanbetsu_practice():
         # 保存時も utf_8_sig で保存することで、次に開く時も文字化けしない
         log_entry.to_csv(log_file, mode='a', header=not os.path.exists(log_file), index=False, encoding="utf_8_sig")
         st.rerun()
-
-    if st.button("🏠 シミュレーションメニューに戻る", use_container_width=True):
-        st.session_state['sub_page'] = 'menu'
-        st.rerun()
 def show_regimen_simulation():
     # --- 1. スタイル定義 ---
     st.markdown("""
@@ -3171,9 +3167,6 @@ def show_regimen_simulation():
     """, unsafe_allow_html=True)
 
     st.divider()
-    if st.button("🏠 シミュレーションメニューに戻る", use_container_width=True):
-        st.session_state['sub_page'] = 'menu'
-        st.rerun()
 # ==========================================
 # TDMシミュレーション
 # ==========================================
@@ -3288,9 +3281,6 @@ def solve_teic_nakayama_mc(dose_df, weight, ccr, max_t, n_sim=10):
         all_results.append(c_profile)
     return t_eval, np.array(all_results), {'CL': tv_cl, 'V1': tv_v1, 'k12': tv_k12, 'k21': tv_k21, 'om': om}
 def show_tdm_simulation():
-    st.set_page_config(page_title="Professional TDM Simulator", layout="wide")
-    st.title("🧪 プロフェッショナルTDMシミュレーター (安原・中山モデル実装版)")
-
     # Session State の維持
     if "dose_h" not in st.session_state:
         st.session_state.dose_h = pd.DataFrame(columns=["Day", "時刻", "1回量(mg)", "投与時間(h)", "投与間隔(h)", "回数", "rel_t"])
@@ -3521,6 +3511,7 @@ def main():
             if st.button("🏠 メインメニューへ", use_container_width=True):
                 st.session_state['page'] = 'main'
                 # 各種フラグのリセット
+                st.session_state['sub_page'] = 'menu'
                 st.session_state.forum_view = "list"
                 if "adding_material" in st.session_state: st.session_state.adding_material = False
                 if "selected_material_idx" in st.session_state: st.session_state.selected_material_idx = None
