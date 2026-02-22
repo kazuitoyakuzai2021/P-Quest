@@ -2790,7 +2790,7 @@ def show_simulation_page():
         with col3:
             with st.container(border=True):
                 st.subheader("📈 TDM解析練習")
-                st.write("VCM/TEICの血中濃度予測と初期投与設計を練習します。(全10症例)")
+                st.write("VCM/TEICの血中濃度予測と初期投与設計を練習します。")
                 if st.button("TDM練習を始める", width='stretch', type="primary"):
                     st.session_state['sub_page'] = 'tdm_practice'
                     st.rerun()
@@ -3576,3 +3576,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
