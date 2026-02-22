@@ -400,19 +400,29 @@ def show_signup_page():
         with st.form("signup_form"):
             new_id = st.text_input("職員番号 (6桁)", max_chars=6)
             new_name = st.text_input("お名前")
-            new_pw = st.text_input("パスワード (4桁)", type="password", max_chars=4)
+            new_pw = st.text_input("パスワード (4桁：自分に関連しない番号)", type="password", max_chars=4)
+
+            # --- 追加: セキュリティコード入力 ---
+            security_code = st.text_input("登録用暗証番号（管理者から聞いてください。）", type="password")
 
             if st.form_submit_button("登録を実行する", use_container_width=True):
+                # 1. フォームの入力漏れチェック
                 if len(new_id) == 6 and new_name and len(new_pw) == 4:
-                    success, msg = register_user(new_id, new_name, new_pw)
-                    if success:
-                        st.success(msg)
-                        st.session_state['is_staff_confirmed'] = False
-                        st.rerun()
+
+                    # 2. 合言葉のチェック
+                    if security_code == "hmc7111":
+                        success, msg = register_user(new_id, new_name, new_pw)
+                        if success:
+                            st.success(msg)
+                            # 登録成功後は確認画面（ログイン）へ戻す
+                            st.session_state['is_staff_confirmed'] = False
+                            st.rerun()
+                        else:
+                            st.error(msg)
                     else:
-                        st.error(msg)
+                        st.error("登録用暗証番号が正しくありません。登録できません。管理者へ")
                 else:
-                    st.warning("入力を確認してください。")
+                    st.warning("職員番号は6桁、パスワードは4桁で入力してください。")
 
         if st.button("ログイン画面へ戻る"):
             st.session_state['is_staff_confirmed'] = False
@@ -3576,5 +3586,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
