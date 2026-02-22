@@ -10,10 +10,15 @@ import base64
 import shutil
 import time
 import io
+import numpy as np
 import urllib.parse
 import hashlib
 import plotly.express as px
 from collections import Counter
+import plotly.graph_objects as go
+from scipy.integrate import odeint
+from scipy.optimize import minimize
+from datetime import datetime
 
 # --- 1. 設定・パス関連 ---
 LOGIN_FILE = "assets/spread_data/login_data.csv"
@@ -1718,6 +1723,7 @@ def show_study_page():
     u_id = user.get('id', 'default_user')
     u_name = user.get('name', 'Unknown')
     u_role = str(user.get('role', '一般'))
+    # 管理者・メンター権限の確認
     is_admin = any(r in u_role for r in ["管理者", "教育係", "メンター"])
 
     # --- 2. フィルター設定 ---
@@ -1738,8 +1744,9 @@ def show_study_page():
         c_filter = st.selectbox("📂 小カテゴリ絞り込み", min_opts)
     with col_f3:
         st.write("")
-        if st.button("➕ 新規資料を登録", use_container_width=True, type="primary"):
+        if st.button("➕ 新規資料を登録", width='stretch', type="primary"):
             st.session_state.adding_material = True
+            st.session_state.selected_material_idx = None  # 追加時は選択解除
             st.rerun()
 
     st.divider()
@@ -1765,27 +1772,20 @@ def show_study_page():
                     if minor_count > 0 or c_filter != "すべて":
                         st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;**📂 {minor} ({minor_count}個)**")
                         for idx, row in minor_df.iterrows():
-                            # タイプと拡張子に応じたラベル表示の切り替え
+                            # タイプと拡張子に応じたラベル
                             if row["タイプ"] == "URL":
                                 type_label = "(URL)"
                             else:
                                 ext = os.path.splitext(row["ファイル名"])[1].lower()
-                                if ext in [".doc", ".docx"]:
-                                    type_label = "(Word)"
-                                elif ext in [".ppt", ".pptx"]:
-                                    type_label = "(PPT)"
-                                elif ext == ".pdf":
-                                    type_label = "(PDF)"
-                                else:
-                                    type_label = "(File)"
+                                type_label = f"({ext.replace('.', '').upper()})"
 
-                            if st.button(f"📄 {row['タイトル']} {type_label}", key=f"mat_{idx}", use_container_width=True):
+                            if st.button(f"📄 {row['タイトル']} {type_label}", key=f"mat_{idx}", width='stretch'):
                                 st.session_state.selected_material_idx = idx
                                 st.session_state.adding_material = False
                                 st.rerun()
 
     with col_view:
-        # --- A. 新規登録画面（Word対応・同期処理付き） ---
+        # --- A. 新規登録画面 ---
         if st.session_state.get('adding_material'):
             with st.container(border=True):
                 st.subheader("🆕 新規資料の登録")
@@ -1799,15 +1799,14 @@ def show_study_page():
                 if n_type == "URL(リンク)":
                     n_url = st.text_input("🌐 URLを入力")
                 else:
-                    # typeに docx, doc を追加
                     n_up = st.file_uploader("ファイルを選択", type=["pdf", "pptx", "ppt", "docx", "doc"])
                     if n_up: n_fname = n_up.name
 
                 st.divider()
-                if st.button("💾 登録して同期", type="primary", use_container_width=True):
+                if st.button("💾 登録して同期", type="primary", width='stretch'):
                     if n_title and (n_url or n_fname):
                         with st.spinner("保存中..."):
-                            # ファイル保存処理
+                            # ファイル保存
                             if n_type != "URL(リンク)" and n_up:
                                 with open(os.path.join(STORAGE_DIR, n_fname), "wb") as f:
                                     f.write(n_up.getbuffer())
@@ -1821,10 +1820,15 @@ def show_study_page():
                             df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
                             df.to_csv(CSV_FILE, index=False, encoding="utf_8_sig")
 
-                        # --- GitHub同期実行 ---
+                        # GitHub同期 (GitHubSyncEngineまたはsync_user_assetsを想定)
                         with st.status("📥 GitHubへ同期中...") as status:
                             try:
-                                sync_user_assets(u_id, mode="upload", scope="drive")
+                                # integrated_materials.csvの同期を明示的に行う
+                                if "github_sync_engine" in globals():
+                                    github_sync_engine(CSV_FILE, mode="upload")
+                                elif "sync_user_assets" in globals():
+                                    sync_user_assets(u_id, mode="upload", scope="drive")
+
                                 status.update(label="✅ 同期完了", state="complete")
                                 st.success(f"『{n_title}』を登録・同期しました！")
                                 time.sleep(1)
@@ -1832,11 +1836,11 @@ def show_study_page():
                                 st.rerun()
                             except Exception as e:
                                 status.update(label="❌ 同期失敗", state="error")
-                                st.error(f"同期に失敗しました。終了時に再度お試しください: {e}")
+                                st.error(f"同期に失敗しました: {e}")
                     else:
                         st.error("タイトルと、URLまたはファイルは必須です。")
 
-                if st.button("キャンセル"):
+                if st.button("キャンセル", width='stretch'):
                     st.session_state.adding_material = False
                     st.rerun()
 
@@ -1851,40 +1855,49 @@ def show_study_page():
                 with st.container(border=True):
                     if data["タイプ"] == "URL":
                         st.success(f"🔗 URL: {data['URL']}")
-                        st.link_button("🌐 リンク先を開く", data["URL"], use_container_width=True)
+                        st.link_button("🌐 リンク先を開く", data["URL"], width='stretch')
                     else:
                         f_path = os.path.join(STORAGE_DIR, data["ファイル名"])
                         if os.path.exists(f_path):
                             ext = os.path.splitext(data["ファイル名"])[1].lower()
                             if ext == ".pdf":
                                 display_pdf(f_path)
-                            elif ext in [".docx", ".doc"]:
-                                st.info("Wordファイルは直接プレビューできません。ダウンロードして確認してください。")
+                            elif ext in [".docx", ".doc", ".pptx", ".ppt"]:
+                                st.info(f"{ext.replace('.', '').upper()}ファイルはプレビュー非対応です。ダウンロードしてください。")
                                 with open(f_path, "rb") as f:
-                                    st.download_button("📥 ダウンロード (Word)", f, file_name=data["ファイル名"],
-                                                       use_container_width=True)
-                            else:
-                                st.info(f"{ext.upper()}ファイルはダウンロードして確認してください。")
-                                with open(f_path, "rb") as f:
-                                    st.download_button(f"📥 ダウンロード ({ext.replace('.', '').upper()})", f,
-                                                       file_name=data["ファイル名"],
-                                                       use_container_width=True)
+                                    st.download_button(f"📥 ダウンロード ({ext.replace('.', '').upper()})",
+                                                       f, file_name=data["ファイル名"], width='stretch')
                         else:
                             st.error("ファイルが見つかりません。")
 
+                # 管理権限または本人のみ削除可能
                 if is_admin or data["登録者"] == u_name:
-                    if st.button("🗑️ この資料を削除"):
-                        with st.spinner("削除中..."):
+                    st.divider()
+                    if st.button("🗑️ この資料を削除して同期", type="secondary", width='stretch'):
+                        with st.spinner("削除・同期中..."):
+                            # 実ファイルの削除
+                            if data["タイプ"] == "FILE":
+                                f_real_path = os.path.join(STORAGE_DIR, data["ファイル名"])
+                                if os.path.exists(f_real_path):
+                                    os.remove(f_real_path)
+
+                            # CSVから削除して保存
                             df = df.drop(idx)
                             df.to_csv(CSV_FILE, index=False, encoding="utf_8_sig")
-                            # 削除時も同期
-                            sync_user_assets(u_id, mode="upload", scope="drive")
+
+                            # 削除後の同期実行
+                            try:
+                                if "github_sync_engine" in globals():
+                                    github_sync_engine(CSV_FILE, mode="upload")
+                                elif "sync_user_assets" in globals():
+                                    sync_user_assets(u_id, mode="upload", scope="drive")
+                                st.success("資料を削除し、クラウドと同期しました。")
+                                time.sleep(1)
+                            except Exception as e:
+                                st.error(f"削除後の同期に失敗しました: {e}")
+
                             st.session_state.selected_material_idx = None
                             st.rerun()
-                        if data["タイプ"] == "FILE":
-                            f_real_path = os.path.join(STORAGE_DIR, data["ファイル名"])
-                            if os.path.exists(f_real_path):
-                                os.remove(f_real_path)
         else:
             st.info("📂 左のフォルダから資料を選択してください。")
 # ==========================================
@@ -2040,12 +2053,14 @@ def show_mentor_page():
     # メニュー選択
     menu = st.sidebar.radio(
         "メニューを選択",
-        ["👥 新人進捗ダッシュボード", "📊 全員比較マトリックス", "📋 チェックリスト編集"],
-        key="mentor_menu_v2"
+        ["👥 新人進捗ダッシュボード", "📊 全員比較マトリックス", "⚙️ マスターデータ管理"],
+        key="mentor_menu_v3"
     )
 
     st.sidebar.divider()
     if st.sidebar.button("🏠 メインメニューへ戻る", width='stretch'):
+        # 画面を戻る際にモードをリセット
+        st.session_state.master_mode = "list"
         st.session_state.page = "main"
         st.rerun()
 
@@ -2054,8 +2069,12 @@ def show_mentor_page():
         render_dashboard_view()
     elif menu == "📊 全員比較マトリックス":
         render_matrix_view()
-    elif menu == "📋 チェックリスト編集":
-        render_checklist_editor()
+    elif menu == "⚙️ マスターデータ管理":
+        # ここでフォームモードか一覧モードかを判定
+        if st.session_state.get("master_mode") == "form":
+            render_questions_form_editor()
+        else:
+            render_master_editor()
 def render_dashboard_view():
     st.title("新人薬剤師 育成進捗一覧")
 
@@ -2354,22 +2373,278 @@ def render_matrix_view():
             )
         except Exception as e:
             st.error(f"Excel作成エラー: {e}")
-def render_checklist_editor():
-    st.title("📋 実務チェックリスト項目編集")
+def render_master_editor():
+    st.title("🛠️ マスターデータ管理GUI")
 
-    if os.path.exists(TASK_CSV):
-        df_tasks = pd.read_csv(TASK_CSV, encoding="utf_8_sig")
-    else:
-        df_tasks = pd.DataFrame(columns=["カテゴリ", "項目"])
+    MASTER_FILES = {
+        "📖 問題マスター (questions.csv)": "assets/spread_data/questions.csv",
+        "📋 実務項目 (task_list.csv)": "assets/spread_data/task_list.csv",
+        "要指導・症例 (regimen_cases.csv)": "assets/spread_data/regimen_cases.csv",
+        "要指導・鑑別 (kanbetsu_cases.csv)": "assets/spread_data/kanbetsu_cases.csv"
+    }
 
-    st.write("※ 編集後、必ず下の保存ボタンを押してください。")
-    edited_df = st.data_editor(df_tasks, num_rows="dynamic", width='stretch')
+    selected_label = st.selectbox("管理するデータを選択してください", list(MASTER_FILES.keys()))
+    file_path = MASTER_FILES[selected_label]
 
-    if st.button("💾 この内容でマスターを更新保存", width='stretch'):
-        edited_df.to_csv(TASK_CSV, index=False, encoding="utf_8_sig")
-        st.success("タスクリストを更新しました。")
-        time.sleep(1)
+    # 【重要】問題マスターの場合のみ、専用フォームへの切替ボタンを出す
+    if "questions.csv" in file_path:
+        with st.container(border=True):
+            st.markdown("##### 📝 問題の作成・編集を効率化しませんか？")
+            st.caption("大項目・小項目での絞り込みや、長文の解説入力がしやすい専用画面に切り替えます。")
+            if st.button("🚀 問題作成・編集専用フォームを起動", use_container_width=True, type="primary"):
+                st.session_state.master_mode = "form"
+                st.rerun()
+        st.divider()
+
+    try:
+        df = pd.read_csv(file_path, encoding="utf_8_sig").fillna('')
+        st.subheader(f"{selected_label} の一括編集")
+
+        edited_df = st.data_editor(
+            df,
+            use_container_width=True,
+            num_rows="dynamic",
+            hide_index=False,
+            key=f"editor_{selected_label}",
+            height=500
+        )
+
+        if st.button("💾 変更を確定して保存", type="secondary"):
+            edited_df.to_csv(file_path, index=False, encoding="utf_8_sig")
+            if "github_sync_engine" in globals():
+                github_sync_engine(file_path, mode="upload")
+            st.success("保存完了！")
+            st.balloons()
+    except Exception as e:
+        st.error(f"読み込みエラー: {e}")
+def render_questions_form_editor():
+    st.title("📝 問題マスター：作成・修正コンソール")
+
+    # セッション状態のリセット用
+    if "edit_target_index" not in st.session_state:
+        st.session_state.edit_target_index = None
+
+    # 戻るボタン
+    if st.button("⬅️ マスター管理一覧へ戻る"):
+        st.session_state.master_mode = "list"
+        st.session_state.edit_target_index = None
         st.rerun()
+
+    # パス設定
+    QUESTIONS_CSV = "assets/spread_data/questions.csv"
+    LIB_CSV = "assets/spread_data/integrated_materials.csv"
+    LIB_STORAGE_DIR = "assets/drive_data/materials"
+
+    # データ読み込み
+    if os.path.exists(QUESTIONS_CSV):
+        df_q = pd.read_csv(QUESTIONS_CSV, encoding="utf_8_sig").fillna("")
+    else:
+        df_q = pd.DataFrame(columns=["大項目", "小項目", "形式", "レベル", "問題文", "解答", "解説", "資料タイトル", "作成者"])
+
+    # カテゴリー定義（共通利用）
+    sub_categories = {
+        "内規": ["調剤室業務", "注射室業務"],
+        "薬剤": ["精神神経・筋疾患", "骨・関節疾患", "免疫疾患", "心臓・血管系疾患", "腎・泌尿器疾患", "産科婦人科疾患", "呼吸器疾患", "消化器疾患", "血液及び造血器疾患",
+               "感覚器疾患", "内分泌・代謝疾患", "皮膚疾患", "感染症", "悪性腫瘍", "その他"],
+        "チーム": ["感染", "栄養", "緩和"],
+        "その他": ["その他"]
+    }
+
+    # --- 0. モード選択と既存データの読み込み ---
+    with st.container(border=True):
+        mode = st.radio("作業モード", ["🆕 新規作成", "✏️ 既存問題の修正"], horizontal=True)
+
+        target_row = None
+        if mode == "✏️ 既存問題の修正":
+            # 🔍 問題検索フィルタ（大項目・小項目の2段階）
+            c_search1, c_search2, c_search3 = st.columns([1, 1, 2])
+            with c_search1:
+                search_maj = st.selectbox("大項目で絞り込み", ["すべて"] + list(sub_categories.keys()), key="edit_search_maj")
+            with c_search2:
+                search_min_opts = ["すべて"] + sub_categories.get(search_maj, []) if search_maj != "すべて" else ["すべて"]
+                search_min = st.selectbox("小項目で絞り込み", search_min_opts, key="edit_search_min")
+
+            # フィルタリング実行
+            filtered_df = df_q.copy()
+            if search_maj != "すべて":
+                filtered_df = filtered_df[filtered_df["大項目"] == search_maj]
+            if search_min != "すべて":
+                filtered_df = filtered_df[filtered_df["小項目"] == search_min]
+
+            with c_search3:
+                selected_q_text = st.selectbox("修正する問題を選択", filtered_df["問題文"].tolist(), key="edit_select_q")
+
+            if selected_q_text:
+                target_row = df_q[df_q["問題文"] == selected_q_text].iloc[0]
+                st.session_state.edit_target_index = df_q[df_q["問題文"] == selected_q_text].index[0]
+                st.info(f"💡 編集モード：{selected_q_text[:40]}...")
+
+    # --- 1. 基本設定 ---
+    with st.container(border=True):
+        st.markdown("##### 1. カテゴリー・形式・レベル設定")
+        c1, c2, c3, c4 = st.columns(4)
+
+        def get_val(key, default):
+            return target_row[key] if target_row is not None and key in target_row else default
+
+        with c1:
+            major = st.selectbox("親カテゴリー", list(sub_categories.keys()),
+                                 index=list(sub_categories.keys()).index(get_val("大項目", "内規")) if get_val("大項目",
+                                                                                                          "内規") in sub_categories else 0)
+        with c2:
+            current_subs = sub_categories.get(major, ["その他"])
+            minor = st.selectbox("小カテゴリー", current_subs,
+                                 index=current_subs.index(get_val("小項目", "")) if get_val("小項目",
+                                                                                         "") in current_subs else 0)
+        with c3:
+            q_types = ["〇×問題", "4択問題 (単一選択)", "4択問題 (複数選択可)", "記述問題"]
+            q_type = st.selectbox("問題形式", q_types,
+                                  index=q_types.index(get_val("形式", "〇×問題")) if get_val("形式", "〇×問題") in q_types else 0)
+        with c4:
+            level = st.select_slider("難易度レベル", options=["★", "★★", "★★★", "★★★★"], value=get_val("レベル", "★"))
+
+    # --- 2. 問題・解答 ---
+    with st.container(border=True):
+        st.markdown("##### 2. 問題文と解答")
+        question_text = st.text_area("問題文を入力してください", value=get_val("問題文", ""), height=100)
+
+        raw_ans = get_val("解答", "")
+        answer_data = ""
+
+        if q_type == "〇×問題":
+            ans_val = st.radio("正解を選択", ["〇", "×"], index=0 if raw_ans != "×" else 1, horizontal=True)
+            answer_data = ans_val
+        elif "4択問題" in q_type:
+            cols = st.columns(2)
+            choices = ["", "", "", ""]
+            correct_indices = []
+            if "|" in raw_ans:
+                parts = raw_ans.split("|")
+                correct_indices = parts[0].split(",")
+                choices = (parts[1:] + ["", "", "", ""])[:4]
+
+            final_choices, final_corrects = [], []
+            for i in range(4):
+                with cols[i % 2]:
+                    is_correct = st.checkbox(f"正解設定 {i + 1}", value=str(i + 1) in correct_indices, key=f"ans_chk_{i}")
+                    choice_text = st.text_input(f"選択肢 {i + 1}", value=choices[i], key=f"choice_{i}")
+                    final_choices.append(choice_text)
+                    if is_correct: final_corrects.append(str(i + 1))
+            answer_data = f"{','.join(final_corrects)}|{'|'.join(final_choices)}"
+        else:
+            answer_data = st.text_input("正解（模範解答）を入力", value=raw_ans)
+
+    # --- 3. 解説・資料連携 (★資料検索フィルタ機能付) ---
+    with st.container(border=True):
+        st.markdown(f"##### 3. 解説と参考資料")
+        explanation = st.text_area("解説文", value=get_val("解説", ""), height=150)
+
+        st.divider()
+        ref_mode = st.radio("資料設定方法", ["既存のライブラリから選択", "新しく資料を登録", "資料なし"], horizontal=True)
+
+        final_ref_title = get_val("資料タイトル", "")
+        final_file_name = ""
+
+        if ref_mode == "既存のライブラリから選択":
+            if os.path.exists(LIB_CSV):
+                df_lib = pd.read_csv(LIB_CSV, encoding="utf_8_sig").fillna("")
+
+                st.info("💡 初期設定で現在の小カテゴリが選択されています。必要に応じて変更してください。")
+                col_lib_f1, col_lib_f2 = st.columns(2)
+                with col_lib_f1:
+                    lib_p_filter = st.selectbox("資料：大カテゴリで絞り込み", ["すべて"] + list(sub_categories.keys()),
+                                                index=list(sub_categories.keys()).index(major) + 1,
+                                                key="lib_filter_maj")
+                with col_lib_f2:
+                    lib_min_opts = ["すべて"] + sub_categories.get(lib_p_filter, []) if lib_p_filter != "すべて" else ["すべて"]
+                    initial_idx = lib_min_opts.index(minor) if minor in lib_min_opts else 0
+                    lib_c_filter = st.selectbox("資料：小カテゴリで絞り込み", lib_min_opts, index=initial_idx, key="lib_filter_min")
+
+                temp_lib = df_lib.copy()
+                if lib_p_filter != "すべて":
+                    temp_lib = temp_lib[temp_lib["大カテゴリー"] == lib_p_filter]
+                if lib_c_filter != "すべて":
+                    temp_lib = temp_lib[temp_lib["小カテゴリー"] == lib_c_filter]
+
+                if not temp_lib.empty:
+                    selected_display = st.selectbox("資料を選択", temp_lib["タイトル"].tolist(), key="lib_select_final")
+                    lib_row = temp_lib[temp_lib["タイトル"] == selected_display].iloc[0]
+                    final_ref_title = lib_row["タイトル"]
+                else:
+                    st.warning("条件に一致する資料が見つかりません。")
+            else:
+                st.error("資料ライブラリ(CSV)が見つかりません。")
+
+        elif ref_mode == "新しく資料を登録":
+            c_r1, c_r2 = st.columns(2)
+            with c_r1:
+                final_ref_title = st.text_input("資料タイトル")
+            with c_r2:
+                new_ref_type = st.radio("形式", ["FILE", "URL"], horizontal=True)
+
+            if new_ref_type == "FILE":
+                new_file = st.file_uploader("ファイルをアップロード", type=["pdf", "pptx", "docx"])
+                if new_file: final_file_name = new_file.name
+            else:
+                final_url = st.text_input("参照URLを入力")
+
+            ref_detail = st.text_area("資料の説明（ライブラリ用）", height=70)
+
+    # --- 4. 登録・上書き実行 ---
+    st.divider()
+    btn_label = "💾 修正内容を保存（上書き）" if mode == "✏️ 既存問題の修正" else "🚀 新規問題を登録"
+
+    if st.button(btn_label, type="primary", width='stretch'):
+        if not question_text:
+            st.error("問題文は必須です。")
+            return
+
+        try:
+            # 資料ライブラリへの追加
+            if ref_mode == "新しく資料を登録" and final_ref_title:
+                if 'new_file' in locals() and new_file:
+                    os.makedirs(LIB_STORAGE_DIR, exist_ok=True)
+                    with open(os.path.join(LIB_STORAGE_DIR, final_file_name), "wb") as f:
+                        f.write(new_file.getbuffer())
+
+                df_lib_all = pd.read_csv(LIB_CSV, encoding="utf_8_sig") if os.path.exists(LIB_CSV) else pd.DataFrame(
+                    columns=["大カテゴリー", "小カテゴリー", "タイトル", "タイプ", "ファイル名", "URL", "登録者"])
+                new_lib_row = {
+                    "大カテゴリー": major, "小カテゴリー": minor, "タイトル": final_ref_title,
+                    "タイプ": "URL" if 'final_url' in locals() and final_url else "FILE",
+                    "ファイル名": final_file_name, "URL": final_url if 'final_url' in locals() else "",
+                    "登録者": st.session_state.user.get('name', 'admin')
+                }
+                df_lib_all = pd.concat([df_lib_all, pd.DataFrame([new_lib_row])], ignore_index=True)
+                df_lib_all.to_csv(LIB_CSV, index=False, encoding="utf_8_sig")
+
+            # 問題データの登録・更新
+            new_data = {
+                "大項目": major, "小項目": minor, "形式": q_type, "レベル": level,
+                "問題文": question_text, "解答": answer_data, "解説": explanation,
+                "資料タイトル": final_ref_title, "作成者": st.session_state.user.get('name', 'admin')
+            }
+
+            if mode == "✏️ 既存問題の修正":
+                df_q.iloc[st.session_state.edit_target_index] = new_data
+            else:
+                df_q = pd.concat([df_q, pd.DataFrame([new_data])], ignore_index=True)
+
+            df_q.to_csv(QUESTIONS_CSV, index=False, encoding="utf_8_sig")
+
+            # 同期処理
+            if "github_sync_engine" in globals():
+                github_sync_engine(QUESTIONS_CSV, mode="upload")
+                if ref_mode == "新しく資料を登録":
+                    github_sync_engine(LIB_CSV, mode="upload")
+
+            st.success("✅ 保存が完了しました。")
+            st.balloons()
+            time.sleep(1)
+            st.rerun()
+
+        except Exception as e:
+            st.error(f"エラーが発生しました: {e}")
 # ==========================================
 #　検索関連
 # ==========================================
@@ -2494,22 +2769,30 @@ def show_simulation_page():
         st.markdown("## 🎮 シミュレーション・トレーニング")
         st.write("トレーニングしたい項目を選択してください。")
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
 
         with col1:
             with st.container(border=True):
                 st.subheader("💊 持参薬鑑別")
                 st.write("お薬手帳と現物を確認し、鑑別報告書を作成する練習です。")
-                if st.button("持参薬鑑別を始める", use_container_width=True, type="primary"):
+                if st.button("持参薬鑑別を始める", width='stretch', type="primary"):
                     st.session_state['sub_page'] = 'kanbetsu'
                     st.rerun()
 
         with col2:
             with st.container(border=True):
                 st.subheader("🧪 レジメン監査")
-                st.write("浜松医療センターのプロトコルに基づき、抗がん剤の処方監査を練習します。")
-                if st.button("レジメン監査を始める", use_container_width=True, type="primary"):
+                st.write("プロトコルに基づき、抗がん剤の処方監査を練習します。")
+                if st.button("レジメン監査を始める", width='stretch', type="primary"):
                     st.session_state['sub_page'] = 'regimen'
+                    st.rerun()
+
+        with col3:
+            with st.container(border=True):
+                st.subheader("📈 TDM解析練習")
+                st.write("VCM/TEICの血中濃度予測と初期投与設計を練習します。(全10症例)")
+                if st.button("TDM練習を始める", width='stretch', type="primary"):
+                    st.session_state['sub_page'] = 'tdm_practice'
                     st.rerun()
 
         st.divider()
@@ -2517,13 +2800,13 @@ def show_simulation_page():
             st.session_state['page'] = 'main'
             st.rerun()
 
-    # 2. 持参薬鑑別ページ
+    # 各ページへのルーティング
     elif st.session_state['sub_page'] == 'kanbetsu':
-        show_kanbetsu_practice() # 前回の厳格判定版
-
-    # 3. レジメン監査ページ
+        show_kanbetsu_practice()
     elif st.session_state['sub_page'] == 'regimen':
-        show_regimen_simulation() # 新規作成
+        show_regimen_simulation()
+    elif st.session_state['sub_page'] == 'tdm_practice':
+        show_tdm_simulation()
 def show_kanbetsu_practice():
     # --- 1. 厳格なユーザー特定 ---
     if 'user' not in st.session_state or not st.session_state['user'].get('id'):
@@ -2891,6 +3174,296 @@ def show_regimen_simulation():
     if st.button("🏠 シミュレーションメニューに戻る", use_container_width=True):
         st.session_state['sub_page'] = 'menu'
         st.rerun()
+# ==========================================
+# TDMシミュレーション
+# ==========================================
+def model_2comp_infusion(y, t, k10, k12, k21, v1, r_inf):
+    C1, C2 = y
+    dc1dt = (r_inf / v1) - (k10 + k12) * C1 + k21 * C2
+    dc2dt = k12 * C1 - k21 * C2
+    return [dc1dt, dc2dt]
+def solve_pk_single(dose_df, pk, max_t):
+    t_eval = np.arange(0, float(max_t) + 0.5, 0.5)
+    # 最終的な濃度を入れる箱（0で初期化）
+    total_conc = np.zeros_like(t_eval)
+
+    # パラメータの取り出し
+    k10, k12, k21, v1 = pk['k10'], pk['k12'], pk['k21'], pk['V1']
+
+    # 2コンパートメントモデルの解析解（点滴静注）に必要な定数を計算
+    sum_k = k10 + k12 + k21
+    prod_k = k10 * k21
+    alpha = 0.5 * (sum_k + np.sqrt(sum_k ** 2 - 4 * prod_k))
+    beta = 0.5 * (sum_k - np.sqrt(sum_k ** 2 - 4 * prod_k))
+
+    A = (alpha - k21) / (v1 * (alpha - beta))
+    B = (k21 - beta) / (v1 * (alpha - beta))
+
+    # 全ての投与指示をループして「重ね掛け」
+    for _, d in dose_df.iterrows():
+        # --- ここからガードレール ---
+        # 必須項目がNaN（空）または不完全な場合は、この行の計算をスキップする
+        try:
+            if pd.isna(d['1回量(mg)']) or pd.isna(d['回数']) or pd.isna(d['rel_t']) or pd.isna(d['投与時間(h)']):
+                continue
+
+            # 数値変換を試みる（ここで失敗しても計算が止まらないようにする）
+            dose_amt = float(d['1回量(mg)'])
+            inf_time = float(d['投与時間(h)'])
+            rel_t = float(d['rel_t'])
+            num_doses = int(float(d['回数']))
+            interval = float(d['投与間隔(h)']) if not pd.isna(d['投与間隔(h)']) else 0
+
+            # 意味のないデータ（1回量0や回数0）は無視
+            if dose_amt <= 0 or num_doses <= 0 or inf_time <= 0:
+                continue
+        except (ValueError, TypeError):
+            # 万が一数値変換に失敗しても、エラーを出さずに次の行へ
+            continue
+        # --- ここまでガードレール ---
+
+        r_inf = dose_amt / inf_time
+        t_inf = inf_time
+
+        for n in range(num_doses):
+            t_start = rel_t + n * interval
+
+            # 各時間点での濃度を計算して足す
+            for i, t in enumerate(t_eval):
+                dt = t - t_start
+                if dt <= 0:
+                    continue  # まだ投与前
+
+                # 点滴中と点滴終了後で式を分ける
+                if dt <= t_inf:
+                    # 点滴中
+                    c = (r_inf * A / alpha * (1 - np.exp(-alpha * dt)) +
+                         r_inf * B / beta * (1 - np.exp(-beta * dt)))
+                else:
+                    # 点滴終了後
+                    c = (r_inf * A / alpha * (1 - np.exp(-alpha * t_inf)) * np.exp(-alpha * (dt - t_inf)) +
+                         r_inf * B / beta * (1 - np.exp(-beta * t_inf)) * np.exp(-beta * (dt - t_inf)))
+
+                total_conc[i] += c
+
+    return t_eval, total_conc
+def solve_vcm_yasuhara_mc(dose_df, weight, ccr, max_t, n_sim=10):
+    t_eval = np.arange(0, float(max_t) + 0.5, 0.5)
+    tv_cl = (0.797 * ccr) * 0.06 if ccr < 85 else 4.06 * ((weight / 55) ** 0.68)
+    tv_vss = 60.7 * (weight / 55)
+    tv_k12, tv_k21 = 0.525, 0.213
+    om = {'CL': 0.385, 'Vss': 0.254, 'K21': 0.286}
+    cl_sims = tv_cl * np.random.lognormal(-(om['CL'] ** 2) / 2, om['CL'], n_sim)
+    vss_sims = tv_vss * np.random.lognormal(-(om['Vss'] ** 2) / 2, om['Vss'], n_sim)
+    k21_sims = tv_k21 * np.random.lognormal(-(om['K21'] ** 2) / 2, om['K21'], n_sim)
+    all_results = []
+    for s in range(n_sim):
+        v1_s = vss_sims[s] * (k21_sims[s] / (tv_k12 + k21_sims[s]))
+        pk_s = {'k10': cl_sims[s] / v1_s, 'k12': tv_k12, 'k21': k21_sims[s], 'V1': v1_s}
+        _, c = solve_pk_single(dose_df, pk_s, max_t)
+        all_results.append(c)
+    return t_eval, np.array(all_results), {'CL': tv_cl, 'Vss': tv_vss, 'k12': tv_k12, 'k21': tv_k21, 'om': om}
+def solve_teic_nakayama_mc(dose_df, weight, ccr, max_t, n_sim=10):
+    t_eval = np.arange(0, float(max_t) + 0.5, 0.5)
+    tv_cl = 0.00498 * ccr + 0.00426 * weight
+    tv_v1 = 10.4  # 中央容積は固定値
+    tv_k12 = 0.380
+    tv_k21 = 0.0485
+    om = {'CL': 0.221, 'V1': 0.267, 'K21': 0.245}
+    cl_sims = tv_cl * np.random.lognormal(-(om['CL'] ** 2) / 2, om['CL'], n_sim)
+    v1_sims = tv_v1 * np.random.lognormal(-(om['V1'] ** 2) / 2, om['V1'], n_sim)
+    k21_sims = tv_k21 * np.random.lognormal(-(om['K21'] ** 2) / 2, om['K21'], n_sim)
+    all_results = []
+    for s in range(n_sim):
+        k10_s = cl_sims[s] / v1_sims[s]
+        pk_s = {
+            'k10': k10_s,
+            'k12': tv_k12,
+            'k21': k21_sims[s],
+            'V1': v1_sims[s]
+        }
+        # solve_pk_single は内部で y0 = [0, 0] から開始するため、
+        # 正しい初期値 0 からのシミュレーションになります。
+        _, c_profile = solve_pk_single(dose_df, pk_s, max_t)
+        all_results.append(c_profile)
+    return t_eval, np.array(all_results), {'CL': tv_cl, 'V1': tv_v1, 'k12': tv_k12, 'k21': tv_k21, 'om': om}
+def show_tdm_simulation():
+    st.set_page_config(page_title="Professional TDM Simulator", layout="wide")
+    st.title("🧪 プロフェッショナルTDMシミュレーター (安原・中山モデル実装版)")
+
+    # Session State の維持
+    if "dose_h" not in st.session_state:
+        st.session_state.dose_h = pd.DataFrame(columns=["Day", "時刻", "1回量(mg)", "投与時間(h)", "投与間隔(h)", "回数", "rel_t"])
+    if "obs_h" not in st.session_state:
+        st.session_state.obs_h = pd.DataFrame(columns=["Day", "時刻", "実測値", "rel_t"])
+    if "patient_info" not in st.session_state:
+        st.session_state.patient_info = {"drug": "VCM (Yasuhara)", "age": 70, "weight": 60, "scr": 0.8}
+    if "calc_ready" not in st.session_state:
+        st.session_state.calc_ready = False
+
+    def sync_time(df):
+        # 入力中のNone対策: 必要な列がない、または中身が空ならそのまま返す
+        if df is None or (isinstance(df, pd.DataFrame) and df.empty): return df
+        if st.session_state.dose_h.empty: return df
+        try:
+            # 常に dose_h の 有効な1 行目を絶対的な基準（0時間）にする
+            base_df = st.session_state.dose_h.dropna(subset=['Day', '時刻'])
+            if base_df.empty: return df
+            base_row = base_df.iloc[0]
+            base_t = datetime.strptime(f"{int(base_row['Day'])} {base_row['時刻']}", "%d %H:%M")
+
+            df['rel_t'] = df.apply(
+                lambda r: (datetime.strptime(f"{int(r['Day'])} {r['時刻']}", "%d %H:%M") - base_t).total_seconds() / 3600
+                if pd.notna(r['Day']) and pd.notna(r['時刻']) else np.nan,
+                axis=1)
+        except:
+            pass
+        return df
+
+    # サイドバー：症例読み込み機能
+    with st.sidebar:
+        st.header("📂 症例選択")
+        path_p, path_d, path_o = "assets/spread_data/tdm_patients.csv", "assets/spread_data/tdm_doses.csv", "assets/spread_data/tdm_observations.csv"
+        if os.path.exists(path_p):
+            df_p_all = pd.read_csv(path_p)
+            selected_case = st.selectbox("症例を選択", df_p_all['CaseID'].unique())
+            if st.button("症例データを読み込む"):
+                p_match = df_p_all[df_p_all['CaseID'] == selected_case].iloc[0]
+                st.session_state.patient_info = {
+                    "drug": "VCM (Yasuhara)" if "VCM" in str(p_match['Drug']) else "TEIC (Nakayama)",
+                    "age": int(p_match['Age']), "weight": float(p_match['Weight']), "scr": float(p_match['sCr'])}
+                if os.path.exists(path_d):
+                    d_all = pd.read_csv(path_d)
+                    d_rows = d_all[d_all['CaseID'] == selected_case]
+                    st.session_state.dose_h = pd.DataFrame(
+                        {"Day": d_rows['Day'], "時刻": d_rows['Time'], "1回量(mg)": d_rows['Amount'],
+                         "投与時間(h)": d_rows['InfTime'], "投与間隔(h)": d_rows['Interval'],
+                         "回数": d_rows['Count']}).reset_index(drop=True)
+                if os.path.exists(path_o):
+                    o_all = pd.read_csv(path_o)
+                    o_rows = o_all[o_all['CaseID'] == selected_case]
+                    st.session_state.obs_h = pd.DataFrame(
+                        {"Day": o_rows['Day'], "時刻": o_rows['Time'], "実測値": o_rows['Value']}).reset_index(drop=True)
+
+                st.session_state.dose_h = sync_time(st.session_state.dose_h)
+                st.session_state.obs_h = sync_time(st.session_state.obs_h)
+                st.session_state.calc_ready = False
+                st.rerun()
+
+        st.divider()
+        st.header("👤 患者パラメータ")
+        p = st.session_state.patient_info
+        drug_choice = st.radio("採用モデル", ["VCM (Yasuhara)", "TEIC (Nakayama)"], index=0 if "VCM" in p['drug'] else 1)
+        age, weight, scr = st.number_input("年齢", 1, 120, p['age']), st.number_input("体重(kg)", 10, 150,
+                                                                                    int(p['weight'])), st.number_input(
+            "sCr(mg/dL)", 0.1, 10.0, p['scr'])
+        ccr = (((140 - age) * weight) / (72 * max(scr, 0.6)))
+
+        st.divider()
+        show_pop, show_ci, show_bay = st.checkbox("母集団平均を表示", True), st.checkbox("95%信頼区間を表示", True), st.checkbox(
+            "ベイズ推定を表示", True)
+        x_max = st.slider("表示時間(h)", 24, 336, 120)
+
+        # 【修正：計算ボタン】
+        if st.button("🚀 計算実行", use_container_width=True):
+            # 1. エディタから最新のDataFrameを取得し、時間に同期させる
+            st.session_state.dose_h = sync_time(st.session_state.current_dose_df)
+            st.session_state.obs_h = sync_time(st.session_state.current_obs_df)
+            # 2. 計算フラグをON
+            st.session_state.calc_ready = True
+            st.rerun()
+
+    # メイン画面：入力エディタ
+    c1, c2 = st.columns(2)
+    amount_list = list(range(0, 3050, 50))
+    time_list = [f"{h:02d}:{m:02d}" for h in range(24) for m in [0, 30]]
+
+    with c1:
+        st.subheader("💉 投与スケジュール")
+        # 戻り値を temporary な変数（current_dose_df）に受けることで、session_state.dose_h への即時書き込みを防ぎ、None問題を回避
+        st.session_state.current_dose_df = st.data_editor(st.session_state.dose_h, key="ed_d", num_rows="dynamic",
+                                                          column_config={
+                                                              "Day": st.column_config.SelectboxColumn(
+                                                                  options=list(range(1, 31))),
+                                                              "時刻": st.column_config.SelectboxColumn(options=time_list),
+                                                              "1回量(mg)": st.column_config.SelectboxColumn(
+                                                                  options=amount_list),
+                                                              "投与時間(h)": st.column_config.SelectboxColumn(
+                                                                  options=[0.5, 1.0, 1.5, 2.0]),
+                                                              "投与間隔(h)": st.column_config.SelectboxColumn(
+                                                                  options=[8, 12, 24, 48]),
+                                                              "回数": st.column_config.SelectboxColumn(
+                                                                  options=list(range(1, 100)))
+                                                          })
+
+    with c2:
+        st.subheader("🧪 TDM実測値")
+        st.session_state.current_obs_df = st.data_editor(st.session_state.obs_h, key="ed_o", num_rows="dynamic",
+                                                         column_config={
+                                                             "Day": st.column_config.SelectboxColumn(
+                                                                 options=list(range(1, 31))),
+                                                             "時刻": st.column_config.SelectboxColumn(options=time_list)
+                                                         })
+
+    # グラフ表示
+    if st.session_state.calc_ready and not st.session_state.dose_h.empty:
+        if "VCM" in drug_choice:
+            t_plot, sims, base_params = solve_vcm_yasuhara_mc(st.session_state.dose_h, weight, ccr, x_max)
+            v_label, v_prior_key = "Vss", "Vss"
+        else:
+            t_plot, sims, base_params = solve_teic_nakayama_mc(st.session_state.dose_h, weight, ccr, x_max)
+            v_label, v_prior_key = "V1", "V1"
+
+        fig = go.Figure()
+        if show_ci:
+            up, lo = np.percentile(sims, 97.5, axis=0), np.percentile(sims, 2.5, axis=0)
+            fig.add_trace(
+                go.Scatter(x=np.concatenate([t_plot, t_plot[::-1]]), y=np.concatenate([up, lo[::-1]]), fill='toself',
+                           fillcolor='rgba(0,100,255,0.1)', line=dict(color='rgba(0,0,0,0)'), name="95% CI"))
+        if show_pop:
+            fig.add_trace(go.Scatter(x=t_plot, y=np.mean(sims, axis=0), name="母集団平均", line=dict(color='Red', width=2)))
+
+        v_obs = st.session_state.obs_h.dropna(subset=['実測値', 'rel_t'])
+        pk_bayes_final = None
+        if show_bay and not v_obs.empty:
+            om = base_params['om']
+
+            def bayesian_objective(params):
+                cl_ind, v_ind, k21_ind = params
+                v1_ind = v_ind * (k21_ind / (base_params['k12'] + k21_ind)) if "VCM" in drug_choice else v_ind
+                pk_f = {'k10': cl_ind / v1_ind, 'k12': base_params['k12'], 'k21': k21_ind, 'V1': v1_ind}
+                _, cp = solve_pk_single(st.session_state.dose_h, pk_f, x_max)
+                c_pred = np.interp(v_obs['rel_t'], t_plot, cp)
+                err = np.sum(((v_obs['実測値'] - c_pred) ** 2) / (c_pred * 0.2 + 0.1) ** 2)
+                pen = ((np.log(cl_ind) - np.log(base_params['CL'])) ** 2 / om['CL'] ** 2) + \
+                      ((np.log(v_ind) - np.log(base_params[v_prior_key])) ** 2 / om[v_prior_key] ** 2) + \
+                      ((np.log(k21_ind) - np.log(base_params['k21'])) ** 2 / om['K21'] ** 2)
+                return err + pen
+
+            init = [base_params['CL'], base_params[v_prior_key], base_params['k21']]
+            res_b = minimize(bayesian_objective, init, bounds=[(x * 0.1, x * 10) for x in init])
+            b_cl, b_v, b_k21 = res_b.x
+            b_v1 = b_v * (b_k21 / (base_params['k12'] + b_k21)) if "VCM" in drug_choice else b_v
+            pk_bayes_final = {'CL': b_cl, v_label: b_v, 'k21': b_k21}
+            _, c_bay = solve_pk_single(st.session_state.dose_h,
+                                       {'k10': b_cl / b_v1, 'k12': base_params['k12'], 'k21': b_k21, 'V1': b_v1}, x_max)
+            fig.add_trace(go.Scatter(x=t_plot, y=c_bay, name="ベイズ推定", line=dict(color='orange', width=4, dash='dot')))
+
+        if not v_obs.empty:
+            fig.add_trace(go.Scatter(x=v_obs['rel_t'], y=v_obs['実測値'], mode='markers', name="実測値",
+                                     marker=dict(color='red', size=12, symbol='x')))
+
+        fig.update_layout(xaxis_title="時間 (h)", yaxis_title="濃度 (μg/mL)", template="plotly_white", height=600)
+        st.plotly_chart(fig, use_container_width=True)
+
+        if pk_bayes_final:
+            st.subheader("📊 推定パラメータ比較")
+            st.table(pd.DataFrame({"Parameter": ["CL (L/h)", f"{v_label} (L)", "k21 (1/h)"],
+                                   "Population": [base_params['CL'], base_params[v_prior_key], base_params['k21']],
+                                   "Bayesian": [pk_bayes_final['CL'], pk_bayes_final[v_label],
+                                                pk_bayes_final['k21']]}).style.format("{:.3f}", subset=["Population",
+                                                                                                        "Bayesian"]))
+
 # ==========================================
 # ==========================================
 # ==========================================
