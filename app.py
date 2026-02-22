@@ -2367,7 +2367,7 @@ def render_matrix_view():
             st.download_button(
                 label="📗 Excelレポートをダウンロード (全部門)",
                 data=output.getvalue(),
-                file_name=f"進捗比較マトリックス_{datetime.datetime.now().strftime('%Y%m%d')}.xlsx",
+                file_name=f"進捗比較マトリックス_{datetime.now().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 width='stretch'
             )
@@ -3576,4 +3576,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
