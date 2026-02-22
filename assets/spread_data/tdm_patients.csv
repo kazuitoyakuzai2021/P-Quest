@@ -1,0 +1,4 @@
+CaseID,Drug,Age,Weight,sCr
+Case01_VCM_Normal,VCM,70,60,0.85
+Case02_VCM_Renal,VCM,80,50,1.1
+Case03_TEIC_Normal,TEIC,65,60,0.7

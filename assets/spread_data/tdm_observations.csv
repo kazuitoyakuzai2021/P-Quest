@@ -1,0 +1,6 @@
+﻿CaseID,Day,Time,Value
+Case01_VCM_Normal,3,10:00,13.5
+Case01_VCM_Normal,3,12:30,38.2
+Case02_VCM_Renal,2,10:00,22.1
+Case02_VCM_Renal,2,12:00,45.3
+Case03_TEIC_Normal,4,10:00,16.2
