@@ -930,7 +930,7 @@ def show_mentor_page():
     elif menu == "👤 ユーザー権限管理":
         render_user_role_editor()
 def render_user_role_editor():
-    """👤 login_data.csv の role（役職）を編集する専用画面（パスワード非表示版）"""
+    """👤 login_data.csv の role（役職）を編集し、GitHubへ同期する専用画面"""
     st.markdown("### 👤 ユーザー権限管理")
 
     # ログインデータのパス
@@ -947,16 +947,16 @@ def render_user_role_editor():
         st.error(f"データの読み込みに失敗しました: {e}")
         return
 
-    st.info("以下のリストから役職を変更してください。※パスワード情報は保護のため非表示にしています。")
+    st.info("以下のリストから役職を変更してください。保存するとGitHubへ即時同期されます。")
 
     # 2. データエディタでの編集
-    # password列に None を指定することで、画面から非表示にします
+    # password列を None にして非表示にし、role以外を編集不可(disabled)に設定
     edited_df = st.data_editor(
         df,
         column_config={
             "id": st.column_config.TextColumn("ユーザーID", disabled=True),
             "name": st.column_config.TextColumn("名前", disabled=True),
-            "password": None,  # ← ここで列を非表示に設定
+            "password": None,  # パスワードは画面に出さない
             "role": st.column_config.SelectboxColumn(
                 "役職 (role)",
                 options=["管理者", "教育係", "新人薬剤師", "一般"],
@@ -969,27 +969,40 @@ def render_user_role_editor():
         key="user_role_editor_table_secure"
     )
 
-    # 3. 保存ボタン
+    # 3. 保存と同期の実行エリア
     st.divider()
     col_save, col_cancel = st.columns([1, 1])
 
     with col_save:
         if st.button("💾 変更を保存して同期", type="primary", use_container_width=True):
             try:
-                # edited_df には非表示にした password 列も内部的には保持されているため、
-                # そのまま CSV 保存すればパスワードが消えることはありません。
+                # --- ① ローカルCSVに上書き保存 ---
+                # UI上で非表示にしている password 列もデータフレームには残っているので保持されます
                 edited_df.to_csv(LOGIN_CSV, index=False, encoding="utf_8_sig")
 
-                # GitHub同期が必要な場合は有効化
-                # github_sync_engine(LOGIN_CSV, mode="upload")
+                # --- ② GitHub同期を有効化（register_userのロジックを適用） ---
+                # ここで外部関数の github_sync_engine を呼び出し、サーバーへ反映させます
+                success = github_sync_engine(LOGIN_CSV, mode="upload")
 
-                st.success("ユーザー権限を更新しました。")
-                st.balloons()
+                if success:
+                    st.success("ユーザー権限を更新し、GitHubと同期しました！")
+                    st.balloons()
+
+                    # 自身の権限を変更した場合、現在のセッション情報も即時更新してメニューに反映させる
+                    current_user_id = st.session_state['user'].get('id')
+                    # ID列を文字列として比較して、該当する行のroleを取得
+                    new_role_val = edited_df.loc[edited_df['id'].astype(str) == str(current_user_id), 'role'].values
+                    if len(new_role_val) > 0:
+                        st.session_state['user']['role'] = new_role_val[0]
+                else:
+                    st.warning("ローカルへの保存は完了しましたが、GitHubとの同期に失敗しました。通信環境を確認してください。")
+
             except Exception as e:
-                st.error(f"保存中にエラーが発生しました: {e}")
+                st.error(f"保存または同期中にエラーが発生しました: {e}")
 
     with col_cancel:
         if st.button("🔄 キャンセル（再読み込み）", use_container_width=True):
+            # 編集を破棄して最新のCSVデータを読み込み直す
             st.rerun()
 def render_dashboard_view():
     st.title("新人薬剤師 育成進捗一覧")
