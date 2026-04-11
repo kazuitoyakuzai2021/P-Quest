@@ -19,7 +19,9 @@ import plotly.graph_objects as go
 from scipy.integrate import odeint
 from scipy.optimize import minimize
 from datetime import datetime
-
+##streamlit run app.py
+# --- エラーメッセージ対策 ---
+pd.set_option('future.no_silent_downcasting', True)
 # --- 1. 設定・パス関連 ---
 LOGIN_FILE = "assets/spread_data/login_data.csv"
 USERS_BASE_DIR = "assets/users"
@@ -291,8 +293,8 @@ def show_staff_confirmation_page():
             if logo_img:
                 st.markdown(f'<img src="data:image/png;base64,{logo_img}" style="width:70px; margin-bottom:10px;">',
                             unsafe_allow_html=True)
-            st.markdown("<h2 style='color:#1E293B; margin-bottom:0;'>P-Quest</h2>", unsafe_allow_html=True)
-            st.markdown("<p style='color:#64748B; font-size:14px;'>ver 1.0</p>", unsafe_allow_html=True)
+            st.markdown("<h2 style='color:#1E293B; margin-bottom:0;'>P-Quest（浜松医療センター　薬剤科　教育用アプリ）</h2>", unsafe_allow_html=True)
+            st.markdown("<p style='color:#1E293B; font-size:24px;'>ver 1.0</p>", unsafe_allow_html=True)
             st.markdown(
                 "<span style='background:#005243; color:white; padding:3px 12px; border-radius:10px; font-size:12px; font-weight:bold;'>職員認証・ログイン</span>",
                 unsafe_allow_html=True)
@@ -303,7 +305,7 @@ def show_staff_confirmation_page():
             u_pw = st.text_input("パスワード", type="password", placeholder="数字4桁", key="login_pw")
 
             st.markdown(
-                "<p style='font-size:11px; color:#64748B; text-align:left; margin-top:10px;'>【同意】データは研究等に利用される場合があります。</p>",
+                "<p style='font-size:20px; color:#FF4500; text-align:left; margin-top:20px;'>【同意】データは研究等に利用される場合があります。</p>",
                 unsafe_allow_html=True)
             agreed = st.checkbox("同意してログイン", value=True)
 
@@ -365,15 +367,15 @@ def check_login(user_id, password):
             if str(row['id']) == str(user_id) and str(row['password']) == str(password):
                 return row
     return None
-def register_user(user_id, user_name, user_pw):
+def register_user(user_id, user_name, user_pw, role):
     """新規ユーザー登録（登録後に名簿をGitHubへ即時反映）"""
     # 既存チェック
     df = pd.read_csv(LOGIN_FILE)
     if str(user_id) in df['id'].astype(str).values:
         return False, "この番号は既に登録されています。"
 
-    # ローカルのCSVに追記
-    new_data = [user_id, user_name, user_pw, "一般"] # デフォルト役職は「一般」
+    # ローカルのCSVに追記（引数のroleを書き込む）
+    new_data = [user_id, user_name, user_pw, role]
     with open(LOGIN_FILE, mode="a", encoding="utf_8_sig", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(new_data)
@@ -391,27 +393,40 @@ def register_user(user_id, user_name, user_pw):
     except Exception as e:
         print(f"同期エラー: {e}")
 
-    return True, "登録が完了しました！"
+    return True, f"登録が完了しました！（役職: {role}）"
 def show_signup_page():
     """新規登録画面"""
     _, col, _ = st.columns([1, 1.2, 1])
     with col:
         st.markdown("<div class='login-container'><h3>新規ユーザー登録</h3></div>", unsafe_allow_html=True)
+
+        # --- 役職ごとの合言葉設定 ---
+        SECURITY_CODES = {
+            "hmc7111": "一般",  # 以前のコードの合言葉
+            "mentor7111": "教育係",  # 教育係用
+            "new7111": "新人薬剤師"  # 新人薬剤師用
+        }
+
         with st.form("signup_form"):
             new_id = st.text_input("職員番号 (6桁)", max_chars=6)
             new_name = st.text_input("お名前")
             new_pw = st.text_input("パスワード (4桁：自分に関連しない番号)", type="password", max_chars=4)
 
-            # --- 追加: セキュリティコード入力 ---
-            security_code = st.text_input("登録用暗証番号（管理者から聞いてください。）", type="password")
+            # --- 合言葉入力 ---
+            security_code = st.text_input("登録用合言葉（管理者から聞いてください）", type="password")
 
             if st.form_submit_button("登録を実行する", use_container_width=True):
                 # 1. フォームの入力漏れチェック
                 if len(new_id) == 6 and new_name and len(new_pw) == 4:
 
-                    # 2. 合言葉のチェック
-                    if security_code == "hmc7111":
-                        success, msg = register_user(new_id, new_name, new_pw)
+                    # 2. 合言葉のチェックと役職の判定
+                    if security_code in SECURITY_CODES:
+                        # 入力された合言葉に対応する役職を取得
+                        assigned_role = SECURITY_CODES[security_code]
+
+                        # register_userに役職を渡して実行
+                        success, msg = register_user(new_id, new_name, new_pw, assigned_role)
+
                         if success:
                             st.success(msg)
                             # 登録成功後は確認画面（ログイン）へ戻す
@@ -420,7 +435,7 @@ def show_signup_page():
                         else:
                             st.error(msg)
                     else:
-                        st.error("登録用暗証番号が正しくありません。登録できません。管理者へ")
+                        st.error("登録用合言葉が正しくありません。管理者へ確認してください。")
                 else:
                     st.warning("職員番号は6桁、パスワードは4桁で入力してください。")
 
@@ -799,7 +814,7 @@ def show_checklist_menu():
         # 4. 製剤室（設計中）
         st.button("⚗️ 製剤室 (設計中)", use_container_width=True, disabled=True)
 def show_progress_page():
-    """📊 習得度チェックリスト画面（ご提示のコードをベースに調整）"""
+    """📊 習得度チェックリスト画面（時間保存なし・同期有効版）"""
     # セッションから表示対象（調剤室 or 注射室）を取得
     name = st.session_state.get('current_task_view', '不明')
 
@@ -807,11 +822,13 @@ def show_progress_page():
     TASK_CSV = "assets/spread_data/task_list.csv"
     u_id = st.session_state['user'].get('id', 'guest')
     PROG_PATH = f"assets/users/{u_id}/my_progress.csv"
-    HEADER = ["カテゴリ", "項目", "習得度", "最終更新"]
+    # --- 修正：HEADERから「最終更新」を削除 ---
+    HEADER = ["カテゴリ", "項目", "習得度"]
 
     # --- 同期・読み込み処理 ---
     if f"prog_synced_{name}" not in st.session_state:
-        # github_sync_engine(PROG_PATH, mode="download") # 必要に応じて有効化
+        # 画面を開いた際に最新データをGitHubから取得
+        github_sync_engine(PROG_PATH, mode="download")
         st.session_state[f"prog_synced_{name}"] = True
 
     current_progress = {}
@@ -831,7 +848,7 @@ def show_progress_page():
         st.error("タスクリスト(task_list.csv)が見つかりません。")
         relevant_tasks = []
 
-    # --- 評価項目の入力計算（メインエリア用） ---
+    # --- 評価項目の入力計算 ---
     scores = []
     st.markdown(f"### 📊 {name} の習得度")
     for task in relevant_tasks:
@@ -856,38 +873,50 @@ def show_progress_page():
     else:
         st.info("該当する項目がありません。")
 
-    # --- 👈 サイドバーへの配置（保存・戻る） ---
+    # --- サイドバーへの配置（保存・戻る） ---
     with st.sidebar:
         st.markdown("---")
-        # 1. 保存ボタン（サイドバー内）
+        # 1. 保存ボタン
         if st.button("💾 保存して同期", type="primary", use_container_width=True, key="side_save_btn"):
-            # --- 保存ロジック（ご提示のものをそのまま利用） ---
+            # --- 保存ロジック（日付処理を削除） ---
             new_rows = []
-            now_str = datetime.datetime.now().strftime("%Y-%m-%d")
+
+            # 既存の他カテゴリのデータは維持する
             if os.path.exists(PROG_PATH):
                 try:
                     df_old = pd.read_csv(PROG_PATH, encoding="utf_8_sig")
-                    new_rows = df_old[df_old["カテゴリ"] != name].values.tolist()
+                    # 現在のカテゴリ（name）以外の行を抽出してリスト化
+                    new_rows = df_old[df_old["カテゴリ"] != name][HEADER].values.tolist()
                 except:
                     pass
 
+            # 現在表示中のデータを追加
             for task, score in zip(relevant_tasks, scores):
-                new_rows.append([name, task, score, now_str])
+                new_rows.append([name, task, score])
 
+            # 保存用データフレーム作成
             df_save = pd.DataFrame(new_rows, columns=HEADER)
             os.makedirs(os.path.dirname(PROG_PATH), exist_ok=True)
             df_save.to_csv(PROG_PATH, index=False, encoding="utf_8_sig")
-            # github_sync_engine(PROG_PATH, mode="upload")
-            st.success("保存しました！")
-            st.session_state['page'] = 'checklist'  # メニューへ戻る
+
+            # GitHub同期を実行
+            success = github_sync_engine(PROG_PATH, mode="upload")
+
+            if success:
+                st.success("GitHubに同期しました！")
+                st.balloons()
+            else:
+                st.warning("ローカル保存完了（同期失敗）")
+
+            st.session_state['page'] = 'checklist'
             st.rerun()
 
-        # 2. 戻るボタン（サイドバー内）
+        # 2. 戻るボタン
         if st.button("← 戻る", use_container_width=True, key="side_back_btn"):
             st.session_state['page'] = 'checklist'
             st.rerun()
 
-        # 3. メインメニューへ戻るボタン（画像にあったもの）
+        # 3. メインメニューへ
         if st.button("🏠 メインメニューへ", use_container_width=True, key="side_main_btn"):
             st.session_state['page'] = 'main'
             st.rerun()
@@ -1037,7 +1066,7 @@ def render_dashboard_view():
                 # ユーザーデータとマスターをマージして未着手分(1)を補完
                 merged = pd.merge(m_sub[['項目']], df_user_p[df_user_p['カテゴリ'] == cat_name][['項目', '習得度']], on='項目',
                                   how='left')
-                merged['習得度'] = merged['習得度'].fillna(1).astype(int)
+                merged['習得度'] = merged['習得度'].fillna(1).infer_objects(copy=False).astype(int)
 
                 # 進捗計算: (合計スコア - 項目数*1) / (項目数*4) ※習得度1=0%, 5=100%
                 current_sum = merged['習得度'].sum()
