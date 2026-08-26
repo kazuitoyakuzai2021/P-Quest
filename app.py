@@ -1357,6 +1357,8 @@ def render_matrix_view():
             )
         except Exception as e:
             st.error(f"Excel作成エラー: {e}")
+
+
 def render_master_editor():
     st.title("🛠️ マスターデータ管理GUI")
 
@@ -1382,6 +1384,86 @@ def render_master_editor():
 
     try:
         df = pd.read_csv(file_path, encoding="utf_8_sig").fillna('')
+
+        # ★ 問題マスターの場合、添削状況の確認・編集をしやすくするための処理
+        column_config = None
+        column_order = None
+
+        if "questions.csv" in file_path:
+            # 添削関連の列が無い場合は追加して補完
+            for col in ["添削ステータス", "添削者", "作成者", "作成日", "修正者", "修正日"]:
+                if col not in df.columns:
+                    df[col] = ""
+
+            # 未入力のステータスは「未添削」で補完
+            df["添削ステータス"] = df["添削ステータス"].apply(
+                lambda x: x if x in ["未添削", "添削中", "添削完了"] else "未添削")
+
+            # --- 小項目ごとの進捗集計テーブル（作成人数含む）の作成・表示 ---
+            st.markdown("##### 📊 小項目別の添削進捗状況・作成者数")
+
+            # 1. 添削ステータスごとのクロス集計（大項目・小項目軸）
+            status_df = pd.crosstab(
+                [df["大項目"].replace("", "未設定"), df["小項目"].replace("", "未設定")],
+                df["添削ステータス"]
+            )
+
+            # 必要なステータス列を確保
+            for status in ["未添削", "添削中", "添削完了"]:
+                if status not in status_df.columns:
+                    status_df[status] = 0
+
+            # 2. 小項目ごとのユニーク作成者数を計算
+            creator_counts = (
+                df.groupby([df["大項目"].replace("", "未設定"), df["小項目"].replace("", "未設定")])["作成者"]
+                .apply(lambda x: len(set([c for c in x if c != ""])))
+                .reset_index(name="作成者人数")
+                .set_index(["大項目", "小項目"])
+            )
+
+            # 集計テーブルの結合
+            summary_table = status_df[["未添削", "添削中", "添削完了"]].join(creator_counts)
+            summary_table["合計問題数"] = summary_table["未添削"] + summary_table["添削中"] + summary_table["添削完了"]
+
+            # 列順の調整
+            summary_table = summary_table[["未添削", "添削中", "添削完了", "合計問題数", "作成者人数"]]
+
+            # 表の表示
+            st.dataframe(
+                summary_table,
+                use_container_width=True,
+                column_config={
+                    "未添削": st.column_config.NumberColumn("🔴 未添削", format="%d 件"),
+                    "添削中": st.column_config.NumberColumn("🟡 添削中", format="%d 件"),
+                    "添削完了": st.column_config.NumberColumn("🟢 添削完了", format="%d 件"),
+                    "合計問題数": st.column_config.NumberColumn("合計問題数", format="%d 件"),
+                    "作成者人数": st.column_config.NumberColumn("👥 作成者数", format="%d 人"),
+                }
+            )
+
+            # --- エディタの設定（ドロップダウン化 & 列順調整） ---
+            column_config = {
+                "添削ステータス": st.column_config.SelectboxColumn(
+                    "添削ステータス",
+                    help="添削の進捗状況を選択してください",
+                    options=["未添削", "添削中", "添削完了"],
+                    required=True,
+                    width="small"
+                ),
+                "添削者": st.column_config.TextColumn("添削者", width="small"),
+                "作成者": st.column_config.TextColumn("作成者", width="small"),
+                "問題文": st.column_config.TextColumn("問題文", width="large"),
+                "解説": st.column_config.TextColumn("解説", width="medium"),
+            }
+
+            # 主要な項目（ステータス、カテゴリ、作成者など）が左側に並ぶように順序を規定
+            desired_order = ["添削ステータス", "添削者", "大項目", "小項目", "作成者", "問題文", "形式", "レベル",
+                             "解答", "解説", "資料タイトル", "作成日", "修正者", "修正日"]
+            # 実際のDFにある列のみで構成（想定外の列があっても末尾に保持）
+            existing_cols = [c for c in desired_order if c in df.columns]
+            other_cols = [c for c in df.columns if c not in existing_cols]
+            column_order = existing_cols + other_cols
+
         st.subheader(f"{selected_label} の一括編集")
 
         edited_df = st.data_editor(
@@ -1390,7 +1472,9 @@ def render_master_editor():
             num_rows="dynamic",
             hide_index=False,
             key=f"editor_{selected_label}",
-            height=500
+            height=500,
+            column_config=column_config,
+            column_order=column_order
         )
 
         if st.button("💾 変更を確定して保存", type="secondary"):
@@ -1401,6 +1485,8 @@ def render_master_editor():
             st.balloons()
     except Exception as e:
         st.error(f"読み込みエラー: {e}")
+
+
 def render_questions_form_editor():
     st.title("📝 問題マスター：作成・修正コンソール")
 
@@ -1423,13 +1509,20 @@ def render_questions_form_editor():
     if os.path.exists(QUESTIONS_CSV):
         df_q = pd.read_csv(QUESTIONS_CSV, encoding="utf_8_sig").fillna("")
     else:
-        df_q = pd.DataFrame(columns=["大項目", "小項目", "形式", "レベル", "問題文", "解答", "解説", "資料タイトル", "作成者"])
+        df_q = pd.DataFrame(
+            columns=["大項目", "小項目", "形式", "レベル", "問題文", "解答", "解説", "資料タイトル", "作成者"])
+
+    # 必要な列の自動補完（添削関連列の追加）
+    for col in ["作成日", "修正者", "修正日", "添削ステータス", "添削者"]:
+        if col not in df_q.columns:
+            df_q[col] = ""
 
     # カテゴリー定義（共通利用）
     sub_categories = {
-        "内規": ["調剤室業務", "注射室業務","ミキシング"],
-        "薬剤と疾患": ["精神神経・筋疾患", "骨・関節疾患", "免疫疾患", "心臓・血管系疾患", "腎・泌尿器疾患", "産科婦人科疾患", "呼吸器疾患", "消化器疾患", "血液及び造血器疾患",
-               "感覚器疾患", "内分泌・代謝疾患", "皮膚疾患", "感染症", "悪性腫瘍", "その他"],
+        "内規": ["調剤室業務", "注射室業務", "ミキシング"],
+        "薬剤と疾患": ["精神神経・筋疾患", "骨・関節疾患", "免疫疾患", "心臓・血管系疾患", "腎・泌泌器疾患",
+                       "産科婦人科疾患", "呼吸器疾患", "消化器疾患", "血液及び造血器疾患",
+                       "感覚器疾患", "内分泌・代謝疾患", "皮膚疾患", "感染症", "悪性腫瘍", "その他"],
         "チーム": ["感染", "栄養", "緩和"],
         "その他": ["その他"]
     }
@@ -1440,13 +1533,23 @@ def render_questions_form_editor():
 
         target_row = None
         if mode == "✏️ 既存問題の修正":
-            # 🔍 問題検索フィルタ（大項目・小項目の2段階）
-            c_search1, c_search2, c_search3 = st.columns([1, 1, 2])
-            with c_search1:
-                search_maj = st.selectbox("大項目で絞り込み", ["すべて"] + list(sub_categories.keys()), key="edit_search_maj")
-            with c_search2:
-                search_min_opts = ["すべて"] + sub_categories.get(search_maj, []) if search_maj != "すべて" else ["すべて"]
-                search_min = st.selectbox("小項目で絞り込み", search_min_opts, key="edit_search_min")
+            st.markdown("##### 🔍 修正対象問題の絞り込み")
+            # 🔍 絞り込みフィルター（4列構成）
+            c_s1, c_s2, c_s3, c_s4 = st.columns(4)
+            with c_s1:
+                search_maj = st.selectbox("大項目", ["すべて"] + list(sub_categories.keys()), key="edit_search_maj")
+            with c_s2:
+                search_min_opts = ["すべて"] + sub_categories.get(search_maj, []) if search_maj != "すべて" else [
+                    "すべて"]
+                search_min = st.selectbox("小項目", search_min_opts, key="edit_search_min")
+            with c_s3:
+                # 作成者フィルター
+                creators = ["すべて"] + sorted([c for c in df_q["作成者"].unique().tolist() if c])
+                search_creator = st.selectbox("作成者", creators, key="edit_search_creator")
+            with c_s4:
+                # 添削ステータスフィルター
+                search_status = st.selectbox("添削状況", ["すべて", "未添削", "添削中", "添削完了"],
+                                             key="edit_search_status")
 
             # フィルタリング実行
             filtered_df = df_q.copy()
@@ -1454,14 +1557,34 @@ def render_questions_form_editor():
                 filtered_df = filtered_df[filtered_df["大項目"] == search_maj]
             if search_min != "すべて":
                 filtered_df = filtered_df[filtered_df["小項目"] == search_min]
+            if search_creator != "すべて":
+                filtered_df = filtered_df[filtered_df["作成者"] == search_creator]
+            if search_status != "すべて":
+                if search_status == "未添削":
+                    filtered_df = filtered_df[
+                        (filtered_df["添削ステータス"] == "未添削") | (filtered_df["添削ステータス"] == "")]
+                else:
+                    filtered_df = filtered_df[filtered_df["添削ステータス"] == search_status]
 
-            with c_search3:
-                selected_q_text = st.selectbox("修正する問題を選択", filtered_df["問題文"].tolist(), key="edit_select_q")
+            # 選択肢用ラベルの作成 (例: [添削完了] (山田) 問題文...)
+            if not filtered_df.empty:
+                display_options = {}
+                for idx, row in filtered_df.iterrows():
+                    status_str = row['添削ステータス'] if row['添削ステータス'] else "未添削"
+                    creator_str = f"({row['作成者']})" if row['作成者'] else ""
+                    label = f"[{status_str}] {creator_str} {row['問題文'][:35]}..."
+                    display_options[label] = idx
 
-            if selected_q_text:
-                target_row = df_q[df_q["問題文"] == selected_q_text].iloc[0]
-                st.session_state.edit_target_index = df_q[df_q["問題文"] == selected_q_text].index[0]
-                st.info(f"💡 編集モード：{selected_q_text[:40]}...")
+                selected_label = st.selectbox("修正・添削する問題を選択してください", list(display_options.keys()),
+                                              key="edit_select_q_label")
+
+                if selected_label:
+                    target_idx = display_options[selected_label]
+                    target_row = df_q.loc[target_idx]
+                    st.session_state.edit_target_index = target_idx
+                    st.info(f"💡 選択中の問題: {target_row['問題文']}")
+            else:
+                st.warning("該当する問題が見つかりません。検索条件を変更してください。")
 
     # --- 1. 基本設定 ---
     with st.container(border=True):
@@ -1474,16 +1597,17 @@ def render_questions_form_editor():
         with c1:
             major = st.selectbox("親カテゴリー", list(sub_categories.keys()),
                                  index=list(sub_categories.keys()).index(get_val("大項目", "内規")) if get_val("大項目",
-                                                                                                          "内規") in sub_categories else 0)
+                                                                                                               "内規") in sub_categories else 0)
         with c2:
             current_subs = sub_categories.get(major, ["その他"])
             minor = st.selectbox("小カテゴリー", current_subs,
                                  index=current_subs.index(get_val("小項目", "")) if get_val("小項目",
-                                                                                         "") in current_subs else 0)
+                                                                                            "") in current_subs else 0)
         with c3:
             q_types = ["〇×問題", "4択問題 (単一選択)", "4択問題 (複数選択可)", "記述問題"]
             q_type = st.selectbox("問題形式", q_types,
-                                  index=q_types.index(get_val("形式", "〇×問題")) if get_val("形式", "〇×問題") in q_types else 0)
+                                  index=q_types.index(get_val("形式", "〇×問題")) if get_val("形式",
+                                                                                            "〇×問題") in q_types else 0)
         with c4:
             level = st.select_slider("難易度レベル", options=["★", "★★", "★★★", "★★★★"], value=get_val("レベル", "★"))
 
@@ -1510,7 +1634,8 @@ def render_questions_form_editor():
             final_choices, final_corrects = [], []
             for i in range(4):
                 with cols[i % 2]:
-                    is_correct = st.checkbox(f"正解設定 {i + 1}", value=str(i + 1) in correct_indices, key=f"ans_chk_{i}")
+                    is_correct = st.checkbox(f"正解設定 {i + 1}", value=str(i + 1) in correct_indices,
+                                             key=f"ans_chk_{i}")
                     choice_text = st.text_input(f"選択肢 {i + 1}", value=choices[i], key=f"choice_{i}")
                     final_choices.append(choice_text)
                     if is_correct: final_corrects.append(str(i + 1))
@@ -1518,13 +1643,14 @@ def render_questions_form_editor():
         else:
             answer_data = st.text_input("正解（模範解答）を入力", value=raw_ans)
 
-    # --- 3. 解説・資料連携 (★資料検索フィルタ機能付) ---
+    # --- 3. 解説・資料連携 ---
     with st.container(border=True):
-        st.markdown(f"##### 3. 解説と参考資料")
+        st.markdown("##### 3. 解説と参考資料")
         explanation = st.text_area("解説文", value=get_val("解説", ""), height=150)
 
         st.divider()
-        ref_mode = st.radio("資料設定方法", ["既存のライブラリから選択", "新しく資料を登録", "資料なし"], horizontal=True)
+        ref_mode = st.radio("資料設定方法", ["既存のライブラリから選択", "新しく資料を登録", "資料なし"],
+                            horizontal=True)
 
         final_ref_title = get_val("資料タイトル", "")
         final_file_name = ""
@@ -1537,12 +1663,15 @@ def render_questions_form_editor():
                 col_lib_f1, col_lib_f2 = st.columns(2)
                 with col_lib_f1:
                     lib_p_filter = st.selectbox("資料：大カテゴリで絞り込み", ["すべて"] + list(sub_categories.keys()),
-                                                index=list(sub_categories.keys()).index(major) + 1,
+                                                index=list(sub_categories.keys()).index(
+                                                    major) + 1 if major in sub_categories else 0,
                                                 key="lib_filter_maj")
                 with col_lib_f2:
-                    lib_min_opts = ["すべて"] + sub_categories.get(lib_p_filter, []) if lib_p_filter != "すべて" else ["すべて"]
+                    lib_min_opts = ["すべて"] + sub_categories.get(lib_p_filter, []) if lib_p_filter != "すべて" else [
+                        "すべて"]
                     initial_idx = lib_min_opts.index(minor) if minor in lib_min_opts else 0
-                    lib_c_filter = st.selectbox("資料：小カテゴリで絞り込み", lib_min_opts, index=initial_idx, key="lib_filter_min")
+                    lib_c_filter = st.selectbox("資料：小カテゴリで絞り込み", lib_min_opts, index=initial_idx,
+                                                key="lib_filter_min")
 
                 temp_lib = df_lib.copy()
                 if lib_p_filter != "すべて":
@@ -1574,9 +1703,35 @@ def render_questions_form_editor():
 
             ref_detail = st.text_area("資料の説明（ライブラリ用）", height=70)
 
-    # --- 4. 登録・上書き実行 ---
+    # --- 4. 添削・確認ステータス管理 ---
+    with st.container(border=True):
+        st.markdown("##### 4. 添削・確認ステータス")
+
+        c_status1, c_status2 = st.columns(2)
+
+        # 既存のステータスを取得（無ければ未添削）
+        current_review_status = get_val("添削ステータス", "未添削")
+        if not current_review_status:
+            current_review_status = "未添削"
+
+        status_options = ["未添削", "添削中", "添削完了"]
+
+        with c_status1:
+            review_status = st.radio(
+                "添削状況",
+                status_options,
+                index=status_options.index(current_review_status) if current_review_status in status_options else 0,
+                horizontal=True
+            )
+
+        with c_status2:
+            existing_reviewer = get_val("添削者", "")
+            st.caption(f"現在の添削者: **{existing_reviewer if existing_reviewer else 'なし'}**")
+            st.caption("※ステータスを変更して保存すると、ログイン中のユーザーが「添削者」として自動記録されます。")
+
+    # --- 5. 登録・上書き実行 ---
     st.divider()
-    btn_label = "💾 修正内容を保存（上書き）" if mode == "✏️ 既存問題の修正" else "🚀 新規問題を登録"
+    btn_label = "💾 修正内容・添削状況を保存（上書き）" if mode == "✏️ 既存問題の修正" else "🚀 新規問題を登録"
 
     if st.button(btn_label, type="primary", use_container_width=True):
         if not question_text:
@@ -1593,7 +1748,8 @@ def render_questions_form_editor():
                 if ref_mode == "新しく資料を登録" and final_ref_title:
                     df_lib_all = pd.read_csv(LIB_CSV, encoding="utf_8_sig") if os.path.exists(
                         LIB_CSV) else pd.DataFrame(
-                        columns=["大カテゴリー", "小カテゴリー", "タイトル", "タイプ", "ファイル名", "URL", "登録者", "登録日"])
+                        columns=["大カテゴリー", "小カテゴリー", "タイトル", "タイプ", "ファイル名", "URL", "登録者",
+                                 "登録日"])
 
                     new_lib_row = {
                         "大カテゴリー": major,
@@ -1609,46 +1765,49 @@ def render_questions_form_editor():
                     df_lib_all.to_csv(LIB_CSV, index=False, encoding="utf_8_sig")
 
                 # --- B. 問題データの登録・更新 ---
-                # 新しい列（作成日、修正者、修正日）がない場合に備えて自動追加の準備
-                # ※「作成者」は既存のCSVにあるため、それ以外の足りない列を自動補完します
-                for col in ["作成日", "修正者", "修正日"]:
-                    if col not in df_q.columns:
-                        df_q[col] = ""
-
                 if mode == "✏️ 既存問題の修正":
-                    # 修正時は、既存の行のデータをベースにする
                     target_idx = st.session_state.edit_target_index
 
-                    # すでに登録済みの「作成者」「作成日」があれば引き継ぎ、無ければ今回セットする
+                    # すでに登録済みの情報を取得・保持
                     existing_creator = df_q.iloc[target_idx].get("作成者", current_user)
                     existing_created_date = df_q.iloc[target_idx].get("作成日", current_time)
 
-                    # 既存データが空だった場合のケア
                     if pd.isna(existing_creator) or existing_creator == "":
                         existing_creator = current_user
                     if pd.isna(existing_created_date) or existing_created_date == "":
                         existing_created_date = current_time
 
+                    # 添削者情報の更新判定
+                    reviewer = df_q.iloc[target_idx].get("添削者", "")
+                    if review_status in ["添削中", "添削完了"]:
+                        reviewer = current_user  # 添削した人をセット
+
                     new_data = {
                         "大項目": major, "小項目": minor, "形式": q_type, "レベル": level,
                         "問題文": question_text, "解答": answer_data, "解説": explanation,
                         "資料タイトル": final_ref_title,
-                        "作成者": existing_creator,  # 元の作成者をキープ
-                        "作成日": existing_created_date,  # 元の作成日をキープ
-                        "修正者": current_user,  # 今回修正した人
-                        "修正日": current_time  # 今回修正した日時
+                        "作成者": existing_creator,
+                        "作成日": existing_created_date,
+                        "修正者": current_user,
+                        "修正日": current_time,
+                        "添削ステータス": review_status,
+                        "添削者": reviewer
                     }
                     df_q.iloc[target_idx] = new_data
                 else:
-                    # 新規登録時は、作成者/作成日をセットし、修正者/修正日は空にする
+                    # 新規登録時
+                    reviewer = current_user if review_status in ["添削中", "添削完了"] else ""
+
                     new_data = {
                         "大項目": major, "小項目": minor, "形式": q_type, "レベル": level,
                         "問題文": question_text, "解答": answer_data, "解説": explanation,
                         "資料タイトル": final_ref_title,
                         "作成者": current_user,
                         "作成日": current_time,
-                        "修正者": "",  # 新規なので最初は空欄
-                        "修正日": ""  # 新規なので最初は空欄
+                        "修正者": "",
+                        "修正日": "",
+                        "添削ステータス": review_status,
+                        "添削者": reviewer
                     }
                     df_q = pd.concat([df_q, pd.DataFrame([new_data])], ignore_index=True)
 
@@ -1660,7 +1819,7 @@ def render_questions_form_editor():
                     if ref_mode == "新しく資料を登録":
                         github_sync_engine(LIB_CSV, mode="upload")
 
-                st.success("✅ 保存が完了しました。")
+                st.success("✅ 保存および添削ステータスの更新が完了しました。")
                 st.balloons()
                 time.sleep(1)
 
